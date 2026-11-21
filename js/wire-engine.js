@@ -582,6 +582,13 @@
 
   // Coherent infrastructure archetypes (Spec Section 7.1).
   const INFRASTRUCTURE_ARCHETYPES = {
+    'full-enterprise': {
+      id: 'full-enterprise',
+      title: 'Full enterprise',
+      description: 'Employee systems, public applications, cloud workloads and software delivery on one estate.',
+      preferredIngressGroups: ['f5-gateway', 'forti-vpn'],
+      defaultWalkthroughId: 'walkthrough-public-web'
+    },
     'enterprise-identity': {
       id: 'enterprise-identity',
       title: 'Enterprise identity and endpoints',
@@ -1006,6 +1013,21 @@
     'sql-reporting': ['mssql-db'],
     'forti-ems': ['mssql-db'],
     'weblogic': ['db-rds']
+  };
+
+  // Existing service routes that orient the operator before playback reveals activity.
+  const FULL_ENTERPRISE_OVERVIEW = {
+    'forti-vpn': ['ad-identity', 'iam-idp', 'vault-creds'],
+    'public-gitlab': ['iam-idp'],
+    'f5-gateway': ['cust-api'],
+    'cust-api': ['app-engine', 'iot-hub'],
+    'iam-idp': ['app-engine', 'cicd-runner', 'comp-registry'],
+    'app-engine': ['db-rds'],
+    'iot-hub': ['lake-ops'],
+    'cicd-runner': ['db-rds'],
+    'windows-desktop': ['windows-management'],
+    'windows-rdp': ['windows-management'],
+    'windows-management': ['windows-fleet-finance']
   };
 
   const EXTERNAL_ENTRY_GROUPS = new Set([
@@ -5563,7 +5585,8 @@
   function generateEstate(options = {}) {
     const rawSeed = Number.isInteger(options.estateSeed) ? options.estateSeed : options.seed;
     const seed = Number.isInteger(rawSeed) ? (rawSeed >>> 0) : Math.floor(Math.random() * 4294967296);
-    const preset = options.preset === 'demo'
+    const fullEnterprise = options.archetypeId === 'full-enterprise';
+    const preset = fullEnterprise ? 'mixed' : options.preset === 'demo'
       ? 'demo'
       : (options.preset === 'logs' || options.preset === 'credential-in-logs')
         ? 'logs'
@@ -5582,8 +5605,9 @@
     const randInt = (min, max) => Math.floor(rand(min, max + 1));
     const edgePool = Object.keys(EDGE_APPLIANCES);
     const applianceCount = randInt(5, 7);
-    const preferredIngress = options.preferredIngress || (options.archetypeId ? archetype.preferredIngressGroups.find(g => edgePool.includes(g)) : undefined);
-    const pinned = preset === 'demo' ? ['f5-gateway']
+    const preferredIngress = fullEnterprise ? archetype.preferredIngressGroups[0]
+      : options.preferredIngress || (options.archetypeId ? archetype.preferredIngressGroups.find(g => edgePool.includes(g)) : undefined);
+    const pinned = fullEnterprise ? archetype.preferredIngressGroups : preset === 'demo' ? ['f5-gateway']
       : preset === 'mixed' && edgePool.includes(preferredIngress) ? [preferredIngress] : [];
     const selectedAppliances = new Set([
       ...pinned,
@@ -6342,9 +6366,19 @@
       expectedOperations: ['authenticate', 'read']
     }));
 
+    const groupsByAsset = fullEnterprise ? new Map(keptAssets.map(asset => [asset.id, asset.groupId])) : null;
+    const overviewRoutes = new Map();
+    if (fullEnterprise) {
+      for (const route of keptRels) {
+        if (!FULL_ENTERPRISE_OVERVIEW[groupsByAsset.get(route.sourceId)]?.includes(groupsByAsset.get(route.targetId))) continue;
+        const pair = `${route.sourceId}->${route.targetId}`;
+        if (!overviewRoutes.has(pair)) overviewRoutes.set(pair, route.id);
+      }
+    }
     const estate = {
       schemaVersion: SCHEMA_VERSION,
       id: `estate-${archetypeId}-${seed}`,
+      ...(fullEnterprise && { overviewRouteIds: [...overviewRoutes.values()] }),
       archetypeId,
       estateSeed: seed,
       seed,

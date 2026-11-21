@@ -63,6 +63,7 @@
       <button id="activity-toggle" class="trace-control" type="button" aria-controls="single-activity" aria-expanded="true">Hide CVE stream</button>
       <select id="archetype-selector" class="trace-control" aria-label="Infrastructure archetype" title="Choose an infrastructure archetype or keep reference rotation">
         <option value="auto" selected>Archetype: Auto (Catalog)</option>
+        <option value="full-enterprise">Full enterprise</option>
         <option value="enterprise-identity">Enterprise Identity &amp; Endpoints</option>
         <option value="public-web">Public Web &amp; Internal Data</option>
         <option value="cloud-saas">Cloud &amp; SaaS</option>
@@ -76,20 +77,20 @@
     </div>
   </div>
   <div id="advanced-controls-panel" class="advanced-controls-panel" hidden>
-    <label><input id="ctrl-virtual-patching" type="checkbox"> Virtual Patching (`virtualPatching`)</label>
-    <label><input id="ctrl-canaries" type="checkbox"> Canaries (`canaries`)</label>
-    <label>Response Policy (`responsePolicy`)
+    <label><input id="ctrl-virtual-patching" type="checkbox"> Virtual patching</label>
+    <label><input id="ctrl-canaries" type="checkbox"> Canaries</label>
+    <label>Response policy
       <select id="ctrl-response-policy">
-        <option value="observe_only" selected>observe_only</option>
-        <option value="playbook">playbook</option>
-        <option value="human_led">human_led</option>
-        <option value="agentic">agentic</option>
+        <option value="observe_only" selected>Observe only</option>
+        <option value="playbook">Playbook</option>
+        <option value="human_led">Human-led</option>
+        <option value="agentic">Agentic</option>
       </select>
     </label>
-    <label>Generation Mode
+    <label>Generation mode
       <select id="ctrl-generation-mode">
-        <option value="authored_walkthrough" selected>authored_walkthrough</option>
-        <option value="exploratory">exploratory</option>
+        <option value="authored_walkthrough" selected>Authored walkthrough</option>
+        <option value="exploratory">Exploratory</option>
       </select>
     </label>
     <button id="export-manifest-btn" class="trace-control" type="button">Export Manifest</button>
@@ -230,6 +231,8 @@ function formatAssetTooltip(asset, findings, credentials) {
   return lines.join('\n');
 }
 
+let estateOverview = { assetIds: new Set(), routeIds: new Set() };
+
 function layoutGraph(estate) {
   const w = Math.max(1440, document.getElementById('viewport').clientWidth);
   const graphTop = 80;
@@ -239,8 +242,16 @@ function layoutGraph(estate) {
   svg.innerHTML = '';
   document.getElementById('viewport').classList.remove('illustration-active');
 
-  const displayedIds = new Set(discoveryPlan?.assetIds || estate.assets.map(a=>a.id));
-  const displayedRelationships = new Set(discoveryPlan?.relationshipIds || estate.relationships.map(r=>r.id));
+  const overviewRoutes = new Set(estate.overviewRouteIds || []);
+  const overviewAssets = new Set();
+  for (const route of estate.relationships) {
+    if (!overviewRoutes.has(route.id)) continue;
+    overviewAssets.add(route.sourceId);
+    overviewAssets.add(route.targetId);
+  }
+  estateOverview = { assetIds: overviewAssets, routeIds: overviewRoutes };
+  const displayedIds = new Set([...(discoveryPlan?.assetIds || estate.assets.map(a => a.id)), ...overviewAssets]);
+  const displayedRelationships = new Set([...(discoveryPlan?.relationshipIds || estate.relationships.map(r => r.id)), ...overviewRoutes]);
   const nodes = estate.assets.filter(asset=>displayedIds.has(asset.id)).map(asset => {
     const displayLabel = asset.isDecoy ? `${asset.label} · Decoy` : asset.label;
     const findings = estate.findings.filter(f => f.assetId === asset.id);
@@ -279,7 +290,7 @@ function layoutGraph(estate) {
     el.style.left = `${node.x}px`;
     el.style.top = `${node.y}px`;
 
-    const badge = {code:node.isExternalEntry?'EXTERNAL SURFACE':'DISCOVERED ASSET',title:'No access established'};
+    const badge = {code:node.isExternalEntry ? 'EXTERNAL SURFACE' : overviewAssets.has(node.id) ? 'ESTATE ASSET' : 'DISCOVERED ASSET',title:'No access established'};
     el.innerHTML = `
       <div class="node-icon-wrapper">
         <div class="node-halo"></div>
@@ -349,10 +360,10 @@ function markReferenceFlow(estate, { context, example }) {
 function updateDiscoveredMap(time) {
   if (!discoveryPlan) return;
   const view = RunDiscovery.at(discoveryPlan,time,discoveryStarted);
-  const initial = new Set(discoveryPlan.initialAssetIds);
+  const initial = new Set([...discoveryPlan.initialAssetIds, ...estateOverview.assetIds]);
   let changed = false;
   for (const node of currentNodes.values()) {
-    const visible = view.known.has(node.id);
+    const visible = view.known.has(node.id) || estateOverview.assetIds.has(node.id);
     if (node.el.hidden === visible) changed = true;
     node.el.hidden = !visible;
     node.el.tabIndex = visible ? 0 : -1;
@@ -376,7 +387,7 @@ function updateDiscoveredMap(time) {
     const minimum=new URLSearchParams(location.search).has('embedded')?0:window.innerHeight;
     document.getElementById('viewport').style.height=`${Math.max(minimum,bottom+160)}px`;
   }
-  const edges=new Set(view.relationshipIds);
+  const edges = new Set([...view.relationshipIds, ...estateOverview.routeIds]);
   for(const [id,wire] of currentWires) {
     wire.path.style.display=edges.has(id)&&!wire.source.el.hidden&&!wire.target.el.hidden?'':'none';
     wire.path.setAttribute('d',`M ${wire.source.x} ${wire.source.y} L ${wire.target.x} ${wire.target.y}`);
@@ -408,7 +419,7 @@ function drawGitIllustration(proxy, width, y) {
 function createWire(source, target, relationship) {
   if (!source || !target) return;
   const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  path.setAttribute('class', 'wire');
+  path.setAttribute('class', estateOverview.routeIds.has(relationship.id) ? 'wire estate-route' : 'wire');
   svg.appendChild(path);
   const wire = { source, target, path };
   path.setAttribute('d', `M ${source.x} ${source.y} L ${target.x} ${target.y}`);
@@ -1051,7 +1062,7 @@ function drawPre2023Group() {
 function newInfra() {
   infrastructureNumber++;
   const previous = applianceRoster(estate);
-  referenceCase = drawReferenceCase();
+  referenceCase = archetypeSelector.value === 'full-enterprise' ? null : drawReferenceCase();
   pre2023Group = drawPre2023Group();
   const chosenArchetype = (archetypeSelector && archetypeSelector.value !== 'auto')
     ? archetypeSelector.value
@@ -1099,7 +1110,9 @@ document.fonts.ready.then(() => {
   const saved = sessionStorage.getItem('wire-return-estate');
   if (saved) {
     sessionStorage.removeItem('wire-return-estate');
-    estate = JSON.parse(saved); referenceCase = null; infrastructureNumber = 1; playRun();
+    estate = JSON.parse(saved); referenceCase = null; infrastructureNumber = 1;
+    if (estate.archetypeId === 'full-enterprise') archetypeSelector.value = 'full-enterprise';
+    playRun();
   } else startWire();
 });
 </script>

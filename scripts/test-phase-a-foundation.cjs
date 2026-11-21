@@ -75,9 +75,9 @@ check('F32: validateCalibrationRegister rejects simulationAssumption with invali
 });
 
 // 2. Schema v4 Estate & RunConfig Validation across 4 archetypes and both generationModes (WP1 + WP2)
-check('WP1/WP2: generateEstate emits Schema v4 across all 4 archetypes and both generation modes', () => {
+check('WP1/WP2: generateEstate emits Schema v4 across all archetypes and both generation modes', () => {
   assert.strictEqual(engine.SCHEMA_VERSION, 4, 'SCHEMA_VERSION must be 4');
-  const archetypes = ['enterprise-identity', 'public-web', 'cloud-saas', 'cicd-secrets'];
+  const archetypes = ['full-enterprise', 'enterprise-identity', 'public-web', 'cloud-saas', 'cicd-secrets'];
   const modes = ['exploratory', 'authored_walkthrough'];
 
   for (const archetypeId of archetypes) {
@@ -124,6 +124,28 @@ check('WP1/WP2: generateEstate emits Schema v4 across all 4 archetypes and both 
         uncertaintyMode: 'report_conditional'
       });
       assert.strictEqual(rcRes.valid, true, `validateRunConfig failed for ${archetypeId}/${generationMode}: ${rcRes.errors.join('; ')}`);
+    }
+  }
+});
+
+check('Full enterprise shows all four areas using existing service routes', () => {
+  for (const seed of [1, 2, 3, 42, 99]) {
+    for (const generationMode of ['authored_walkthrough', 'exploratory']) {
+      const options = { seed, archetypeId: 'full-enterprise', generationMode };
+      const estate = engine.generateEstate(options);
+      const routeIds = new Set(estate.overviewRouteIds);
+      const overview = estate.routes.filter(route => routeIds.has(route.id));
+      assert.equal(overview.length, routeIds.size);
+      const groups = new Map(estate.assets.map(asset => [asset.id, asset.groupId]));
+      const overviewPairs = overview.map(route => [groups.get(route.sourceId), groups.get(route.targetId)].join(' → '));
+      for (const pair of [
+        'forti-vpn → ad-identity', 'windows-management → windows-fleet-finance',
+        'f5-gateway → cust-api', 'cust-api → app-engine', 'app-engine → db-rds',
+        'cust-api → iot-hub', 'iot-hub → lake-ops',
+        'iam-idp → cicd-runner', 'iam-idp → comp-registry', 'forti-vpn → vault-creds'
+      ]) assert(overviewPairs.includes(pair), `Missing ${pair} on seed ${seed}`);
+      assert.deepEqual(engine.generateEstate(options), estate);
+      if (generationMode === 'exploratory') assert.deepEqual(estate.walkthroughRouteAssetIds, []);
     }
   }
 });

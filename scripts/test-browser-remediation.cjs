@@ -214,6 +214,28 @@ async function main(){
     assert(evidence.references.includes('04:00:00'));
     await page.emulateMedia({reducedMotion:'reduce'});
     assert.equal(await page.locator('.node-halo').first().evaluate(n=>getComputedStyle(n).animationName),'none');
+    await page.locator('#archetype-selector').selectOption('full-enterprise');
+    const overview = await page.evaluate(() => {
+      cancelAnimationFrame(frame);
+      const shown = [...currentNodes.values()].filter(node => !node.el.hidden);
+      return {
+        id: estate.id,
+        shown: shown.map(node => node.groupId),
+        runnerHelp: shown.find(node => node.groupId === 'cicd-runner')?.el.title,
+        routes: document.querySelectorAll('.wire.estate-route').length
+      };
+    });
+    for (const group of ['ad-identity', 'app-engine', 'lake-ops', 'cicd-runner']) {
+      assert(overview.shown.includes(group), `Missing overview asset ${group}`);
+    }
+    assert(overview.routes > 0);
+    assert.match(overview.runnerHelp, /Findings and stored credentials have not been observed/);
+    await page.click('[data-mode="combined"]');
+    assert.equal(await page.evaluate(() => estate.id), overview.id);
+    const combined = await page.evaluate(() => JSON.stringify(run.events));
+    await page.click('#map-replay-btn');
+    assert.equal(await page.evaluate(() => estate.id), overview.id);
+    assert.equal(await page.evaluate(() => JSON.stringify(run.events)), combined);
     assert.deepEqual(errors,[]);
     if(process.env.REMEDIATION_SCREENSHOT) await page.screenshot({path:process.env.REMEDIATION_SCREENSHOT});
     console.log('PASS browser: New Infra, redirect, console; no label collisions or replay drift');
