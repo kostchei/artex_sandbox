@@ -16,7 +16,7 @@ if (new URLSearchParams(location.search).get('capture') === 'path') {
     .path-capture .node-state{font-size:10px}
     .branch-kind{position:absolute;top:-30px;font-size:9px;letter-spacing:.5px;color:#7ed5e4;background:#0e1820;padding:1px 4px}
     .branch-kind.exploration{color:#d9bd8c}
-    .origin-wire{fill:none;stroke:#7396a6;stroke-width:1;stroke-dasharray:3 6;opacity:.5}
+    .origin-wire{fill:none;stroke:#7396a6;stroke-width:1.2;stroke-dasharray:3 6;opacity:.6;marker-end:url(#wire-arrow-strong)}
     .origin-label{fill:#aabccc;font:11px Arial,sans-serif}
     .path-capture .attacker-marker{width:38px;height:38px;z-index:30;opacity:.7}
     .path-capture .attacker-marker.working{opacity:1;box-shadow:0 0 13px currentColor}
@@ -67,7 +67,7 @@ if (new URLSearchParams(location.search).get('capture') === 'path') {
       offset+=lanes[column];
     });
     document.getElementById('viewport').style.height=`${rows*168+60}px`;
-    for(const wire of currentWires.values())wire.path.setAttribute('d',`M ${wire.source.x} ${wire.source.y} L ${wire.target.x} ${wire.target.y}`);
+    for(const wire of currentWires.values())wire.path.setAttribute('d',typeof wirePath==='function'?wirePath(wire.source,wire.target):`M ${wire.source.x} ${wire.source.y} L ${wire.target.x} ${wire.target.y}`);
     const chainIds=new Set(selection.chainIds||[]);
     for(const node of currentNodes.values()){
       const tag=document.createElement('span');tag.className='branch-kind'+(chainIds.has(node.id)?'':' exploration');tag.textContent=chainIds.has(node.id)?'BREACH CHAIN':'EXPLORATION';node.el.append(tag);

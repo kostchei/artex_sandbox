@@ -239,7 +239,19 @@ function layoutGraph(estate) {
 
   currentWires.clear();
   nodesLayer.innerHTML = '';
-  svg.innerHTML = '';
+  svg.innerHTML = `
+    <defs>
+      <marker id="wire-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto">
+        <path d="M 1 1.8 L 9 5 L 1 8.2 z" fill="context-stroke"/>
+      </marker>
+      <marker id="wire-arrow-strong" viewBox="0 0 12 12" refX="10.2" refY="6" markerWidth="9.5" markerHeight="9.5" markerUnits="userSpaceOnUse" orient="auto">
+        <path d="M 1 1.6 L 11 6 L 1 10.4 L 3.4 6 z" fill="context-stroke"/>
+      </marker>
+      <marker id="wire-chevron-mid" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7.5" markerHeight="7.5" markerUnits="userSpaceOnUse" orient="auto">
+        <path d="M 2.2 1.8 L 8 5 L 2.2 8.2" fill="none" stroke="context-stroke" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </marker>
+    </defs>
+  `;
   document.getElementById('viewport').classList.remove('illustration-active');
 
   const overviewRoutes = new Set(estate.overviewRouteIds || []);
@@ -390,9 +402,43 @@ function updateDiscoveredMap(time) {
   const edges = new Set([...view.relationshipIds, ...estateOverview.routeIds]);
   for(const [id,wire] of currentWires) {
     wire.path.style.display=edges.has(id)&&!wire.source.el.hidden&&!wire.target.el.hidden?'':'none';
-    wire.path.setAttribute('d',`M ${wire.source.x} ${wire.source.y} L ${wire.target.x} ${wire.target.y}`);
+    wire.path.setAttribute('d',wirePath(wire.source,wire.target));
   }
   if(changed)applyAssetSearch();
+}
+
+function nodeHaloRadius(node) {
+  const cl = node?.el?.classList;
+  if (!cl) return 15;
+  if (cl.contains('hit')) return 41;
+  if (cl.contains('defended') || cl.contains('contained') || cl.contains('alerted')) return 27;
+  return 15;
+}
+
+function wirePath(source, target) {
+  const dx = target.x - source.x;
+  const dy = target.y - source.y;
+  const dist = Math.hypot(dx, dy);
+  if (!dist) return `M ${source.x} ${source.y} L ${target.x} ${target.y}`;
+  const ux = dx / dist;
+  const uy = dy / dist;
+  const startPad = Math.min(nodeHaloRadius(source), dist * 0.35);
+  const endPad = Math.min(nodeHaloRadius(target) + 3, dist * 0.45);
+  const x1 = source.x + ux * startPad;
+  const y1 = source.y + uy * startPad;
+  const x2 = target.x - ux * endPad;
+  const y2 = target.y - uy * endPad;
+  const xm = (x1 + x2) / 2;
+  const ym = (y1 + y2) / 2;
+  return `M ${x1} ${y1} L ${xm} ${ym} L ${x2} ${y2}`;
+}
+
+function refreshNodeWires(node) {
+  for (const wire of currentWires.values()) {
+    if (wire.source === node || wire.target === node) {
+      wire.path.setAttribute('d', wirePath(wire.source, wire.target));
+    }
+  }
 }
 
 function drawGitIllustration(proxy, width, y) {
@@ -422,7 +468,7 @@ function createWire(source, target, relationship) {
   path.setAttribute('class', estateOverview.routeIds.has(relationship.id) ? 'wire estate-route' : 'wire');
   svg.appendChild(path);
   const wire = { source, target, path };
-  path.setAttribute('d', `M ${source.x} ${source.y} L ${target.x} ${target.y}`);
+  path.setAttribute('d', wirePath(source, target));
   currentWires.set(relationship.id, wire);
 }
 
@@ -502,9 +548,10 @@ function showProbes(events, laneCount) {
     const wire = currentWires.get(event.relationshipId);
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('class', 'probe-wire');
+    const endX = Math.max(24, target.x - nodeHaloRadius(target) - 3);
     path.setAttribute('d', wire
       ? wire.path.getAttribute('d')
-      : `M 0 ${target.y} L ${target.x} ${target.y}`);
+      : `M 12 ${target.y} L ${(12 + endX) / 2} ${target.y} L ${endX} ${target.y}`);
 
     path.dataset.lane = String(index % laneCount + 1);
     path.style.animationDelay = `${Math.floor(index++ / laneCount) * PROBE_MS}ms`;
@@ -576,6 +623,7 @@ function renderEvent(event, time, animate) {
     node.el.querySelector('.cve').textContent = exported ? 'DATA EXFILTRATED' : finding?.cveId || event.technique || result;
     node.el.querySelector('.vuln-title').textContent = finding?.title || result;
     node.el.querySelector('.node-state').textContent = encrypted ? `${event.affectedEndpointIds.length}/${node.endpointCount || 1} ENCRYPTED` : persistent ? `${event.affectedEndpointIds.length}/${node.endpointCount || 1} PERSISTENT` : phished ? 'PHISH EXECUTED' : exported ? 'DATA EXFILTRATED' : read ? 'DATA FOUND' : blocked ? 'PREVENTED' : contained ? 'CONTAINED' : conditional ? 'CONDITIONAL' : incomplete ? 'INCOMPLETE' : alertOnly ? 'CANARY ALERT' : '';
+    if (typeof refreshNodeWires === 'function') refreshNodeWires(node);
   }
   if (wire) {
     if (blocked) wire.path.classList.add('defended-wire');

@@ -280,6 +280,21 @@ async function main(){
     await page.click('[data-mode="combined"]');
     assert.equal(await page.evaluate(() => estate.id), overview.id);
     const combined = await page.evaluate(() => JSON.stringify(run.events));
+    await page.click('#map-results-btn');
+    const arrowCheck = await page.evaluate(() => {
+      const hitWire = document.querySelector('.wire.hit-wire, .wire.defended-wire, .wire.contained-wire');
+      const style = hitWire ? getComputedStyle(hitWire) : null;
+      return {
+        hasDefs: !!document.getElementById('wire-arrow-strong') && !!document.getElementById('wire-chevron-mid'),
+        markerEnd: style?.markerEnd || '',
+        markerMid: style?.markerMid || '',
+        d: hitWire?.getAttribute('d') || ''
+      };
+    });
+    assert(arrowCheck.hasDefs, 'Expected SVG arrow markers in #wire-svg defs');
+    assert.match(arrowCheck.markerEnd, /wire-arrow-strong/, 'Expected directional arrowhead marker-end on active attack wires');
+    assert.match(arrowCheck.markerMid, /wire-chevron-mid/, 'Expected directional mid-wire chevron marker-mid on active attack wires');
+    assert.equal((arrowCheck.d.match(/L/g) || []).length, 2, 'Expected halo-trimmed 3-point path for mid and end arrow markers');
     await page.click('#map-replay-btn');
     assert.equal(await page.evaluate(() => estate.id), overview.id);
     assert.equal(await page.evaluate(() => JSON.stringify(run.events)), combined);

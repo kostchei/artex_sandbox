@@ -1,6 +1,6 @@
 # Wire diagram: object, connection and KEV logic
 
-> **Current engine note:** Wire playback uses the timed compatibility evaluator. Its manifest records the estate, attacker, defense switches, and exact playback events. The causal comparison API uses `simulateScenario` and `projectRun`, with its own replayable manifests. Both use synthetic estates. The calibration register in `assets/calibration.json` distinguishes historical observations from presentation assumptions.
+> **Current engine note:** Wire playback and comparisons both run on the Schema v4 causal engine (`simulateScenario` and `projectRun`). Playback manifests record the estate, attacker profile, defense switches, run configuration, causal trace and projected events; archived `4.0.0` playback manifests replay through `simulateLegacyWireRun`. The calibration register in `assets/calibration.json` distinguishes historical observations from presentation assumptions.
 
 The intentional Demo-Ready route uses F5 BIG-IP 16.1.0, WSO2 API Manager 3.2.0, and Spring Framework 5.3.17. The broader Mixed estate draws from the appliance pool below. Deployment conditions and access are scenario assumptions. [CISA on BIG-IP](https://www.cisa.gov/sites/default/files/publications/AA22-138A-Threat_Actors_Exploiting_F5_BIG-IP_CVE-2022-1388_F5.pdf) · [CISA on WSO2](https://www.cisa.gov/sites/default/files/2023-08/aa23-215a_joint_csa_2022_top_routinely_exploited_vulnerabilities.pdf) · [Spring advisory](https://spring.io/security/cve-2022-22965/)
 
@@ -180,17 +180,11 @@ Source: https://github.com/BerriAI/litellm/security/advisories/GHSA-v4p8-mg3p-g9
 The Confluence Server 8.5.1 example is within the affected version range for CVE-2023-22515: https://support.atlassian.com/atlassian-knowledge-base/kb/faq-for-cve-2023-22515/
 
 
-### Exposure assignment and scenario calibration
-
-Each infrastructure assigns independent simulated exposures to asset instances: 80% by default, or the asset's explicit vulnerability chance where specified. The assignment, topology, and defense seed persist when changing scenarios. Public access and assumed credentials are scenario findings, not invented CVEs. The generator resamples an infrastructure if the actual baseline probe order cannot reach a data target; the baseline probe order does not use hidden exposure assignments. In the combined scenario, one reachable backend target is replaced by a yellow canary decoy. Access triggers an alert and a simulated SOAR containment playbook; earlier defenses can stop the attack before it reaches the decoy.
-
-Baseline displays at most three successful targets in each layer and at least one data target. Defended scenarios show at most one backend data target hit. A blocked or unexploitable node cannot be used as a stepping stone; agents continue checking other modeled connections. WAF coverage and SOAR detection are synthetic scenario assumptions, not measured security product performance. A defense is credited only when its modeled rule applies and coverage or detection succeeds.
-
 ### Wire playback and comparisons
 
-**New Infra** generates a seeded estate. In **Authored walkthrough**, the selected template installs and validates its declared route, including the dataset access check. **Exploratory** keeps the generated weaknesses and credentials. The Mixed catalog rotation supplies a reference case, and the simulation evaluates the findings actually present in the estate. **Full enterprise** also exposes orienting service links before playback reveals findings, credentials and activity.
+**New Infra** generates a seeded estate. In **Authored walkthrough**, the selected template installs and validates its declared route, including the dataset access check. **Exploratory** keeps the generated weaknesses and credentials without resampling for a target breach rate. The Mixed catalog rotation supplies a reference case, and the simulation evaluates the findings actually present in the estate. **Full enterprise** also exposes orienting service links before playback reveals findings, credentials and activity.
 
-The **Pre-LLM Path** dropdown can pin a historical-style pattern or use the current estate's rotation. Replay, attacker switches and defense changes keep the estate. Conventional patterns use one worker and ARTEX-like uses three. The graph, tickets, dataset evidence and comparison cells all derive from the causal run trace.
+The **Pre-LLM Path** dropdown can pin a historical-style pattern or use the current estate's rotation. Replay, attacker switches and defense changes keep the estate and share the same simulation budget across all defense configurations; display density never restricts modeled access. Conventional patterns use one worker and ARTEX-like uses three. The graph, tickets, dataset evidence and comparison cells all derive from the causal run trace.
 
 Virtual patching follows the configured route and rule coverage. SOC uses observations from deployed sensors and qualifying decoy interactions. A response needs applicable authority and confirmed scope. The intervention contract establishes when confirmation changes a dependent action. Display duration follows the trace after these decisions. See [Stopwatch calibration and limits](timing-assumptions.md).
 

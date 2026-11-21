@@ -65,7 +65,7 @@ function runBoth() {
 function generate() {
   const seed=Number(document.getElementById('seed').value);
   if(!Number.isSafeInteger(seed)||seed<1||seed>4294967295){status.textContent='Enter an integer seed from 1 to 4294967295.';return;}
-  estate=WireEngine.generateEstate({preset:'mixed',seed,seedExercise:true});prepare();status.textContent=describe()+' · Ready';
+  estate=WireEngine.generateEstate({preset:'mixed',seed,generationMode:'authored_walkthrough'});prepare();status.textContent=describe()+' · Ready';
 }
 function newInfra() {
   let seed=crypto.getRandomValues(new Uint32Array(1))[0] || 1;
