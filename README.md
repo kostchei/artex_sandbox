@@ -4,7 +4,13 @@ An interactive visual demonstration of an attacker moving through an enterprise 
 
 The demo is illustrative: its infrastructure, access paths, alerts and defense outcomes are generated for presentation. They are not observations of a real environment or measurements of a product's effectiveness.
 
-![ARTEX wire diagram demo](assets/wire_current_demo.gif)
+![Latest ARTEX wire diagram demo](assets/wire_latest_demo.gif)
+
+*Latest demo above: Full Enterprise overview, directional attack-flow arrows, live TTP / CVE activity stream, 3-agent ARTEX vs. Pre-LLM comparison across the four defense modes, and calibrated timing and dataset volume evidence.*
+
+![Original ARTEX wire diagram demo](assets/wire_current_demo.gif)
+
+*Original demo above: classic single-canvas view ([assets/wire_current_demo.gif](assets/wire_current_demo.gif)).*
 
 [Watch the v2 ARTEX versus Pre-LLM animation](assets/ARTEX_vs_PreLLM_v2.gif): eight runs across the four defense options, with moving attacker/agent markers and the modeled stopwatch. [Scenario and capture notes](docs/v2-animation.md).
 
@@ -60,26 +66,26 @@ The estate may also contain an exposure from the [external misconfiguration pool
 
 | Scenario | What the demo shows |
 | --- | --- |
-| **Baseline** | The estate model evaluates usable paths. Either profile can reach protected data if the generated estate supplies a complete path. |
-| **Virtual Patch** | The WAF stops requests when the modeled rule covers the finding. |
-| **Agentic SOAR** | Matching telemetry starts the estate's modeled collection, decision and response lifecycle. Coverage, authority, latency and enforcement success determine whether the affected session reads protected data before containment. |
-| **Defense-in-Depth** | Virtual patching, the same SOC response lifecycle, and explicit canary alerts together. Decoy contact supplies evidence rather than instantaneous containment. |
+| **Baseline** | The Schema v4 causal engine (`simulateScenario` + `projectRun`) evaluates reachability, capabilities, weaknesses, and scoped credentials. Either profile can read or export sensitive datasets when the estate supplies a viable path. |
+| **Virtual Patch** | Inline WAF enforcement points block requests only when the traversed route is covered, the protocol/fields are inspectable, and an active rule matches the modeled action variant. |
+| **Agentic SOAR** | Deployed sensors emit observations into the SOC investigation and response lifecycle. Response policy (`observe_only`, `playbook`, `human_led`, `agentic`), integration authority, session/token lineage, and explicit intervention contracts determine whether a scoped response is confirmed before a dependent action. |
+| **Defense-in-Depth** | Route-scoped virtual patching, explicit canary decoys/honeytokens, and the SOC response lifecycle together. Qualifying decoy contact delivers attributed alert evidence to the SOC rather than automatic containment. |
 
-WAF coverage, response timing, and outcomes are synthetic assumptions for this exercise.
+WAF coverage, sensor deployment, intervention contracts, and display timings are explicit scenario assumptions recorded in [`assets/calibration.json`](assets/calibration.json).
 
 ## Infrastructure and tickets
 
-The diagram spans internet-facing access, gateways and security controls, internal applications, and data stores. Assets occupy staggered lanes within trust layers, with space reserved for callouts; dense estates scroll vertically and narrow screens can scroll horizontally. Untouched assets use quiet green dots; successful attacks use pink halos, dashed paths and visible CVE callouts. Amber marks prevention, cyan marks containment and gold marks decoy alerts, with text labels explaining each state. Click or keyboard-focus an asset for connections and full details; the magnifier searches asset names, products and CVEs. ARTEX-like uses up to three workers; conventional profiles use one. Every defense uses the same 1,000 evaluated-transition ceiling; label density never limits modeled access. Pending work at the ceiling is reported as incomplete, including when a read has already occurred.
+The diagram spans internet-facing access, gateways and security controls, internal applications, and data stores. Assets occupy staggered lanes within trust layers, with space reserved for callouts; dense estates scroll vertically and narrow screens can scroll horizontally. Untouched assets use quiet green dots; successful attacks use pink halos, animated directional attack-flow arrows (mid-wire chevrons and halo-cleared arrowheads pointing from source to target), and visible CVE/technique callouts. Amber marks prevention, cyan marks confirmed containment, and gold marks decoy alerts, with text labels explaining each state. Click or keyboard-focus an asset to reveal its directional connections, dataset inventory/read/export volumes, and causal **"Why"** inspection details (prerequisites, reason codes, controls, and scope); the magnifier searches asset names, products and CVEs. ARTEX-like uses up to three concurrent workers; conventional profiles use one. Every defense configuration shares identical action-attempt and guardrail budgets; label density never limits modeled access, and sensitive impact is determined by dataset classification rather than diagram layer. Pending work at a guardrail ceiling is reported as incomplete, including when a read has already occurred.
 
-Standalone canary and SOC-plus-canary modes remain available to engine tests; the UI presents the four defense cards from the design reference.
+The top strip presents the four reference defense cards (**Baseline**, **Virtual Patch**, **Agentic SOAR**, **Defense-in-Depth**), while **Controls & Manifest** lets you toggle any independent combination of **Virtual patching**, **Canaries** (including standalone canary and SOC-plus-canary modes), **Response policy** (`Observe only`, `Playbook`, `Human-led`, `Agentic`), and **Generation mode** (`Authored walkthrough` vs. `Exploratory`), or export and re-import deterministic playback manifests.
 
-The HUD distinguishes impact, incomplete exploration and partial or complete session containment. A missing read alone does not earn containment styling. Steps suppressed by effective containment do not count as new blocked attack attempts. Replay preserves the scenario and modeled event history; New Infra generates a new scenario.
+The HUD distinguishes dataset impact, data exfiltration, endpoint encryption/persistence, conditional outcomes, incomplete exploration, and partial or complete session containment. A missing read alone does not earn containment styling. Steps suppressed by effective containment do not count as new blocked attack attempts. Replay preserves the scenario and modeled event history; New Infra generates a new scenario.
 
 An environment may include one network-monitoring system, selected from Cacti, LibreNMS, SolarWinds NPM, Zabbix, PRTG and ManageEngine OpManager. The selection has a 90% inclusion chance before topology filtering. Some products have a mapped historical CVE; others have no CVE assigned.
 
-The SOC tickets are illustrative, generated as activity occurs. A node can produce one or several tickets, with a title, severity and short alert description. Severity and breach detection are demonstration choices, not CVSS scores or actual SIEM findings. Remediation tickets appear when a modeled virtual patch, agentic SOAR response or canary triggers.
+The SOC tickets are illustrative, generated as activity occurs. A node can produce one or several tickets, with a title, severity and short alert description. Severity and breach detection are demonstration choices, not CVSS scores or actual SIEM findings. Remediation tickets appear when a modeled virtual patch, SOC response or canary triggers.
 
-See [wire diagram logic](docs/wire_diagram_logic.md) for the topology and scenario assumptions, [Pre-LLM vs. ARTEX comparison notes](docs/pre-llm-vs-artex-comparison.md) for field context and fixture limits, and the [threat matrix](docs/cisa_kev_threat_matrix.md) for additional vulnerability background.
+See [current tool state and verification](docs/current-tool-state.md), [engineering specification](docs/wire-improvement-engineering-spec.md), [timing and data volumes](docs/wire-timing-and-volume.md), [wire diagram logic](docs/wire_diagram_logic.md), [Pre-LLM vs. ARTEX comparison notes](docs/pre-llm-vs-artex-comparison.md), and the [threat matrix](docs/cisa_kev_threat_matrix.md) for full model contracts and vulnerability background.
 
 ## Testing
 
@@ -94,4 +100,4 @@ npm test
 
 ## License
 
-[Apache License 2.0](LICENSE).
+[GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE).

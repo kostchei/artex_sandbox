@@ -1,8 +1,9 @@
 {
   "name": "artex-sandbox",
+  "version": "1.0.0",
   "private": true,
   "description": "ARTEX attack and defense wire diagram demo",
-  "license": "Apache-2.0",
+  "license": "AGPL-3.0",
   "scripts": {
     "start": "python start.py",
     "test": "node scripts/run-tests.cjs",
