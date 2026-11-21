@@ -37,10 +37,9 @@ If port 8080 is already in use, the launcher opens the existing service at that 
 
 On macOS or Linux, run `./start.sh` from the repository folder. It looks for `python3` and then `python`.
 
-## Demo branches
+## Entry point
 
 - **`main`** runs the demo on the full wire diagram. The site root and old Table View address (`/index.html`) redirect to `/wire.html`.
-- **`wire-combined`** preserves the demo before that change, including the standalone Range Operations dashboard and the original **Compare Combined** toggle. Use this branch to revisit that version.
 
 ## Run the wire diagram
 
