@@ -1,3 +1,4 @@
+// Regression coverage for the timed runner used by archived Wire playback manifests.
 const assert=require('node:assert/strict');
 const e=require('../js/wire-engine');
 function fixture({apiEntry=false}={}) {
@@ -18,7 +19,7 @@ function fixture({apiEntry=false}={}) {
     credentials:[cred('admin','entry','management',['execute']),cred('fleet-admin','management','fleet',['execute','write_local_files','persist_user'],{endpointScope:['ep1','ep2']})],
     actionOrder:assets.map(a=>a.id),defensePosture:{telemetryLayers:[0,1,2,3],decoys:[],collectionDelaySec:0,decisionDelaySec:0}};
 }
-const run=(x,mode='baseline',options={})=>e.simulateWireRun(x,mode,'lockbit',{actionDurations:[1,2,3,4],responseDelay:100,...options});
+const run=(x,mode='baseline',options={})=>e.simulateLegacyWireRun(x,mode,'lockbit',{actionDurations:[1,2,3,4],responseDelay:100,...options});
 const x=fixture(),before=JSON.stringify(x);
 const baseline=run(x);
 assert.deepEqual(baseline.summary.encryptedEndpointIds,['ep1','ep2']);
@@ -32,8 +33,8 @@ for(const event of baseline.events.filter(event=>['persistence','encryption'].in
   assert.equal(event.relationshipId,null);
 }
 assert.deepEqual(run(x,'patch').summary.encryptedEndpointIds,['ep1','ep2'],'WAF cannot reverse endpoint encryption');
-assert.equal(e.simulateWireRun(x,'baseline','artex').summary.encryptedEndpointIds.length,0);
-assert.equal(e.simulateWireRun(fixture({apiEntry:true}),'baseline','artex').summary.encryptedEndpointIds.length,0,'ARTEX can enter without being assigned a ransomware objective');
+assert.equal(e.simulateLegacyWireRun(x,'baseline','artex').summary.encryptedEndpointIds.length,0);
+assert.equal(e.simulateLegacyWireRun(fixture({apiEntry:true}),'baseline','artex').summary.encryptedEndpointIds.length,0,'ARTEX can enter without being assigned a ransomware objective');
 for(const change of ['execute','write','persist','scope','expired','revoked','route','source-capability','writable','startup']) {
   const modified=structuredClone(x),credential=modified.credentials[1];
   if(change==='execute')credential.permissions=credential.permissions.filter(p=>p!=='execute');
@@ -100,7 +101,7 @@ delayed.actionOrder.push('donor');
 delayed.findings.push({id:'donor-access',assetId:'donor',kind:'anonymous_access',technique:'T1190',yieldsCapability:'app_exec'});
 delayed.relationships.push({id:'management-donor',sourceId:'management',targetId:'donor',protocol:'https',direction:'outbound',requiredSourceCapability:'app_exec'});
 delayed.credentials[1].sourceAssetId='donor';
-const discovered=e.simulateWireRun(delayed,'baseline','artex',{actionDurations:[1,2,3,4]});
+const discovered=e.simulateLegacyWireRun(delayed,'baseline','artex',{actionDurations:[1,2,3,4]});
 const fleetAttempts=discovered.events.filter(event=>event.targetId==='fleet');
 assert.equal(fleetAttempts[0].outcome,'ineligible');
 assert(fleetAttempts.some(event=>event.outcome==='succeeded'),'Recovering a scoped credential unlocks the prior route');
@@ -108,7 +109,7 @@ const donorAccess=discovered.events.find(event=>event.targetId==='donor'&&event.
 assert(fleetAttempts.find(event=>event.outcome==='succeeded').startSec>=donorAccess.timeSec,'Recovered credential cannot unlock access before acquisition');
 const duringProbe=structuredClone(delayed);
 duringProbe.assets.find(a=>a.id==='donor').layerIdx=1;
-const changing=e.simulateWireRun(duringProbe,'baseline','artex',{actionDurations:[1,2,20,4]});
+const changing=e.simulateLegacyWireRun(duringProbe,'baseline','artex',{actionDurations:[1,2,20,4]});
 const recoveredAt=changing.events.find(event=>event.targetId==='donor'&&event.outcome==='succeeded').timeSec;
 for(const event of changing.events.filter(event=>event.targetId==='fleet'&&event.outcome==='succeeded'))
   assert(event.startSec>=recoveredAt,'An in-flight failed probe cannot retroactively use a credential recovered after it started');
@@ -136,8 +137,8 @@ for(let seed=1;seed<=50;seed++) {
   }
   if(estate.assets.some(a=>a.conditions?.mfaEnforced || a.conditions?.mfaProtocols?.length))statuses.add('mfa');
   for(const actor of ['lockbit','conti','hive','blackcat','revil','artex']) {
-    const result=e.simulateWireRun(estate,'baseline',actor);
-    assert.deepEqual(e.simulateWireRun(estate,'baseline',actor),result);
+    const result=e.simulateLegacyWireRun(estate,'baseline',actor);
+    assert.deepEqual(e.simulateLegacyWireRun(estate,'baseline',actor),result);
     for(const event of result.events.filter(event=>event.outcome==='succeeded'&&event.affectedEndpointIds)) {
       const asset=estate.assets.find(a=>a.id===event.targetId);
       const inventory=asset.endpointIds||[asset.id];assert(event.affectedEndpointIds.every(id=>inventory.includes(id)));

@@ -184,6 +184,30 @@ async function main(){
     assert.deepEqual(snapshot.events, await page.evaluate(() => JSON.parse(JSON.stringify(run.events))));
     await page.click('#map-replay-btn');
     assert.deepEqual(snapshot.controls, await page.evaluate(() => JSON.parse(JSON.stringify(run.controls))));
+    const comparisonEstateId = await page.evaluate(() => {
+      estate = WireEngine.evaluateComparisonMatrix('speed-race').estate;
+      syncSwitches(normalizeDefenseConfig('baseline'));
+      playRun();
+      return estate.id;
+    });
+    for (const policy of ['playbook', 'human_led', 'agentic', 'observe_only']) {
+      await page.locator('#ctrl-response-policy').selectOption(policy);
+      const evidence = await page.evaluate(() => {
+        finishRun();
+        return {
+          id: estate.id,
+          policy: run.defenseConfig.responsePolicy,
+          read: run.summary.dataReached,
+          investigations: run.outcomes.costs.investigationsExecuted,
+          confirmed: [...socTickets.values()].some(ticket => ticket.title === 'SOAR containment effective')
+        };
+      });
+      assert.equal(evidence.id, comparisonEstateId);
+      assert.equal(evidence.policy, policy);
+      assert.equal(evidence.read, policy === 'observe_only');
+      assert.equal(evidence.confirmed, policy !== 'observe_only');
+      assert.equal(evidence.investigations > 0, ['human_led', 'agentic'].includes(policy));
+    }
     const evidence = await page.evaluate(() => {
       syncSwitches(normalizeDefenseConfig('baseline'));
       estate = generateEstate({ preset: 'demo', seed: 1 });
@@ -212,6 +236,29 @@ async function main(){
     assert.match(evidence.volumes, /Exported .* records/);
     assert(evidence.references.includes('00:02:07'));
     assert(evidence.references.includes('04:00:00'));
+    const badges = await page.evaluate(() => {
+      const fixture = WireEngine.createComparisonEstate();
+      fixture.assets = fixture.assets.filter(asset => ['cmp-edge', 'cmp-data'].includes(asset.id));
+      fixture.assets.forEach(asset => { asset.isExternalEntry = true; });
+      fixture.routes = fixture.relationships = [];
+      fixture.credentials = fixture.sensors = fixture.enforcementPoints = fixture.patchRules = [];
+      fixture.actionOrder = fixture.assets.map(asset => asset.id);
+      fixture.findings = fixture.weaknesses = fixture.assets.map(asset => ({
+        id: `read-${asset.id}`, assetId: asset.id, kind: 'anonymous_access', yieldsCapability: 'data_read'
+      }));
+      fixture.datasets = [
+        { id: 'sensitive-entry', ownerAssetId: 'cmp-edge', sensitivity: 'sensitive', isDecoy: false, allowedOperations: ['read'] },
+        { id: 'public-dataset', ownerAssetId: 'cmp-data', sensitivity: 'public', isDecoy: false, allowedOperations: ['read'] }
+      ];
+      estate = fixture;
+      syncSwitches(normalizeDefenseConfig('baseline'));
+      playRun();finishRun();
+      return fixture.assets.map(asset => {
+        const node = currentNodes.get(asset.id).el;
+        return { label: node.querySelector('.node-state').textContent, breach: node.classList.contains('breach-target') };
+      });
+    });
+    assert.deepEqual(badges, [{ label: 'DATA FOUND', breach: true }, { label: '', breach: false }]);
     await page.emulateMedia({reducedMotion:'reduce'});
     assert.equal(await page.locator('.node-halo').first().evaluate(n=>getComputedStyle(n).animationName),'none');
     await page.locator('#archetype-selector').selectOption('full-enterprise');

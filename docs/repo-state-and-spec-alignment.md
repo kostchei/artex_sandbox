@@ -1,5 +1,7 @@
 # Repository State & Engineering Specification Alignment Review
 
+This review records the earlier implementation gaps. See the [current Wire tool state](current-tool-state.md) for the causal playback cutover and verification results.
+
 **Date:** 21 November 2026  
 **Reviewed Baseline:** `main` (`e:/work/artex_sandbox`)  
 **Target Specification:** [docs/wire-improvement-engineering-spec.md](wire-improvement-engineering-spec.md)

@@ -80,7 +80,7 @@
     <label><input id="ctrl-virtual-patching" type="checkbox"> Virtual patching</label>
     <label><input id="ctrl-canaries" type="checkbox"> Canaries</label>
     <label>Response policy
-      <select id="ctrl-response-policy">
+      <select id="ctrl-response-policy" title="Playbook uses directly attributed alerts. Human-led and Agentic share the current investigation and authority rules.">
         <option value="observe_only" selected>Observe only</option>
         <option value="playbook">Playbook</option>
         <option value="human_led">Human-led</option>
@@ -525,7 +525,7 @@ function renderEvent(event, time, animate) {
   const conditional = event.outcome === 'conditional';
   const incomplete = event.outcome === 'budget_exhausted';
   const alertOnly = event.outcome === 'alert_only' || event.grantedCapability === 'decoy_alert';
-  const read = event.grantedCapability === 'data_read' && node.layerIdx === 3 && !node.isDecoy;
+  const read = Boolean(event.isProtectedRead);
   const encrypted = success && event.actionKind === 'encryption';
   const persistent = success && event.actionKind === 'persistence';
   const phished = success && event.finding?.kind === 'phishing_attachment';
@@ -593,22 +593,27 @@ function renderEvent(event, time, animate) {
 
 function renderControl(event) {
   const node = currentNodes.get(event.targetId);
-  if (!node || node.el.hidden) return;
+  const visible = node && !node.el.hidden;
   const title = event.control === 'denied' ? 'SOAR lacks response authority'
     : event.control === 'failed' ? 'SOAR enforcement failed'
     : event.control === 'enforced' ? 'SOAR containment effective'
-    : event.control === 'decision' ? 'SOAR containment approved'
-    : event.source === 'canary' ? 'Canary alerted' : event.source === 'endpoint' ? 'Endpoint behavior telemetry' : event.source==='data-transfer'?'Data transfer telemetry':'Boundary telemetry';
-  if (event.control === 'signal' && event.source === 'canary') {
+    : event.control === 'decision' ? (event.kind ? 'SOAR response proposed' : 'SOAR containment approved')
+    : event.control === 'investigation' ? 'SOAR investigation completed'
+    : event.control === 'conditional' ? 'Intervention ordering unresolved'
+    : event.control === 'unresolved' ? 'SOAR confirmation pending'
+    : event.source === 'canary' ? 'Canary alerted' : event.source === 'endpoint' ? 'Endpoint behavior telemetry'
+    : event.source === 'data-transfer' ? 'Data transfer telemetry' : event.source === 'sensor' ? 'Suspicious activity observed' : 'Boundary telemetry';
+  if (visible && event.control === 'signal' && event.source === 'canary') {
     const marker = node.el.querySelector('.canary-marker') || document.createElement('span');
     marker.className = 'canary-marker';
     marker.textContent = 'Canary alert';
     node.el.append(marker);
   }
-  const entry = currentNodes.get(event.scope);
-  const detail = `${formatEstimate(event.timeSec)} · Session via ${entry?.label || event.scope}`;
-  node.el.title += `\n${title} · ${detail}`;
-  socTickets.set(`${event.scope}-${event.control}-${event.source}`, { title, severity: 'HIGH', detail });
+  const rootId = run.outcomes?.access.sessions[event.scope]?.rootAssetId || event.scope;
+  const entry = currentNodes.get(rootId);
+  const detail = [formatEstimate(event.timeSec), entry && `Session via ${entry.label}`, event.reason].filter(Boolean).join(' · ');
+  if (visible) node.el.title += `\n${title} · ${detail}`;
+  socTickets.set(event.id || `${event.scope}-${event.control}-${event.source}`, { title, severity: 'HIGH', detail });
 }
 
 function buildAttackerTracks(result) {
@@ -755,7 +760,7 @@ function showTime(time) {
 function renderPhase(phase, animate = false) {
   discoveryStarted=true;
   updateDiscoveredMap(phase.time);
-  for (const event of [...phase.events].sort((a,b) => Number(!a.control)-Number(!b.control))) {
+  for (const event of [...phase.events].sort((a, b) => run.causalEvents ? a.sequence - b.sequence : Number(!a.control) - Number(!b.control))) {
     if (event.control) renderControl(event);
     else renderEvent(event, phase.time, animate);
   }
@@ -782,7 +787,7 @@ function finishRun() {
   const successes = run.events.filter(event => event.outcome === 'succeeded');
   const read = successes.find(event => event.isProtectedRead);
   const milestone = read ?? successes.at(-1);
-  const asset = milestone && currentNodes.get(milestone.targetId);
+  const asset = milestone && estate.assets.find(node => node.id === milestone.targetId);
   const evidence = milestone?.finding?.cveId || milestone?.technique;
   const sampleLogs = successes.find(event => event.finding?.technique === 'T1552.001');
   const result = read ? `Protected record read at ${asset.label} (${formatEstimate(read.timeSec)})`
@@ -792,14 +797,17 @@ function finishRun() {
   const count = layerSuccessCounts[0];
   const containments = run.controls.filter(event => event.control === 'enforced');
   const canarySignals = run.controls.filter(event => event.control === 'signal' && event.source === 'canary');
-  const late = read && containments.some(event => event.scope === read.scope && event.timeSec >= read.timeSec);
+  const late = read && containments.some(event => event.scope === read.scope && (run.causalEvents
+    ? event.sequence > read.sequence && event.stateChanges.some(change => change.kind === 'session_invalidated' && change.sessionId === read.scope)
+    : event.timeSec >= read.timeSec));
+  const { canaries, responsePolicy } = run.defenseConfig;
   const response = late ? 'SOAR contained after the read'
     : run.result.containedSessions ? `${run.result.containedSessions} ${run.result.containedSessions === 1 ? 'session' : 'sessions'} contained`
-    : defense === 'canaries' ? (canarySignals.length ? 'Canary alerted (alert only)' : 'Canary untouched')
+    : canaries && responsePolicy === 'observe_only' ? (canarySignals.length ? 'Canary alerted (alert only)' : 'Canary untouched')
     : run.controls.some(event => event.control === 'failed') ? 'Enforcement failed'
     : run.controls.some(event => event.control === 'denied') ? 'Response authority unavailable'
     : run.controls.some(event => event.control === 'signal') ? 'Alert received; no confirmed enforcement'
-    : defense.startsWith('soc') || defense === 'combined' ? 'No matching signal' : '';
+    : responsePolicy !== 'observe_only' ? 'No matching signal' : '';
   runHud.className = run.result.style;
   const illustration = run.events.some(event => event.outcome === 'succeeded' && event.finding?.illustration === 'git-to-idp')
     ? 'Illustrative branch ends at IdP admin' : '';
@@ -844,6 +852,7 @@ const archetypeSelector = document.getElementById('archetype-selector');
 const advancedControlsToggle = document.getElementById('advanced-controls-toggle');
 const advancedControlsPanel = document.getElementById('advanced-controls-panel');
 let customDefenseConfig = null;
+let importedPlayback = null;
 
 function syncSwitches(cfg) {
   const matchingCard = [...modeButtons].find(button => {
@@ -867,7 +876,13 @@ function playRun() {
   cancelAnimationFrame(frame);
   const attackerId = attackerChoice === 'pre2023' ? activePre2023Group() : 'artex';
   updatePre2023PatternTooltip();
-  run = simulateWireRun(estate, defense, attackerId, customDefenseConfig ? { defenseConfig: customDefenseConfig } : {});
+  const activeConfig = customDefenseConfig || normalizeDefenseConfig(defense);
+  const importedConfig = importedPlayback?.run.defenseConfig;
+  if (importedPlayback && (importedPlayback.estate !== estate || importedPlayback.attackerId !== attackerId ||
+      ['virtualPatching', 'canaries', 'responsePolicy'].some(key => importedConfig[key] !== activeConfig[key]))) {
+    importedPlayback = null;
+  }
+  run = importedPlayback?.run || simulateWireRun(estate, defense, attackerId, { defenseConfig: activeConfig });
   discoveryPlan = RunDiscovery.create(estate,run);
   discoveryStarted = false;
   attackerTracks = buildAttackerTracks(run);
@@ -875,7 +890,7 @@ function playRun() {
   const status = document.getElementById('run-status');
   status.classList.add('running');
   status.textContent = `${customDefenseConfig?.label || defenseLabels[defense]} · Run ${String(runNumber).padStart(2, '0')} · Same infrastructure ${infrastructureNumber}`;
-  clock.title = 'Modeled time since the assumed foothold. Historical references and run milestones are in Controls & Manifest.';
+  clock.title = `Modeled time since ${run.causalEvents ? 'the first probes' : 'the assumed foothold'}. Historical references and run milestones are in Controls & Manifest.`;
   const grouped = new Map();
   for (const event of [...run.events, ...run.controls]) {
     if (!grouped.has(event.timeSec)) grouped.set(event.timeSec, []);
@@ -984,6 +999,7 @@ if (importManifestBtn && importManifestInput) {
     }
     const { attackerId, defenseConfig } = res.manifest;
     estate = res.manifest.estate;
+    importedPlayback = { estate, attackerId, run: res.replayed };
     referenceCase = null;
     attackerChoice = attackerId === 'artex' ? 'artex' : 'pre2023';
     if (attackerChoice === 'pre2023') pre2023Pattern.value = attackerId;

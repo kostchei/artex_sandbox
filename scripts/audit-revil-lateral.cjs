@@ -9,7 +9,7 @@ for (let seed = 1; seed <= 50; seed++) {
   const assets = new Map(estate.assets.map(a => [a.id,a]));
   const successful = run.events.filter(x => x.outcome === 'succeeded');
   const remote = run.events.filter(x => x.sourceId && x.sourceId !== x.targetId &&
-    x.relationshipId && !x.actionKind && !assets.get(x.targetId)?.isDecoy);
+    x.relationshipId && !assets.get(x.targetId)?.isDecoy);
   const lateral = remote.filter(x => x.outcome === 'succeeded' && x.grantedCapability === 'app_exec');
   for (const hop of lateral) assert(successful.some(x => x.targetId === hop.sourceId && x.timeSec <= hop.startSec));
   rows.push({seed, foothold:successful.some(x => x.grantedCapability === 'app_exec'),

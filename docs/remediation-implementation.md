@@ -1,5 +1,7 @@
 # Remediation implementation and validation
 
+This record covers the earlier timed runner. See the [current Wire tool state](current-tool-state.md) for live playback, comparison behavior and manifest compatibility.
+
 Implemented on local `main` after the planning commit `cd9137b`. The original Gemini merge baseline is `8aeae9b`.
 
 ## Delivered behavior

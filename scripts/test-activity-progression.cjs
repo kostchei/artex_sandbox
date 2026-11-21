@@ -1,7 +1,8 @@
+// Regression coverage for the timed runner used by archived Wire playback manifests.
 const assert=require('node:assert/strict');
 const e=require('../js/wire-engine');
 const success=run=>run.events.filter(event=>event.outcome==='succeeded');
-const run=(estate,actor='artex',mode='baseline',options={})=>e.simulateWireRun(estate,mode,actor,options);
+const run=(estate,actor='artex',mode='baseline',options={})=>e.simulateLegacyWireRun(estate,mode,actor,options);
 
 // Hive first has an account session through the Windows branch, then obtains
 // execution through a different foothold. Retry outgoing execution routes and

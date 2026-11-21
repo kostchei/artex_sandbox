@@ -1,3 +1,4 @@
+// Regression coverage for the timed runner used by archived Wire playback manifests.
 const assert = require('node:assert/strict');
 const e = require('../js/wire-engine.js');
 
@@ -19,7 +20,7 @@ function fixture({decoy = false, secondEntry = false} = {}) {
     actionOrder:assets.map(a=>a.id),defensePosture:{telemetryLayers:[0,1,2,3],decoys:decoy?[{assetId:'decoy'}]:[]}};
 }
 const opts = {actionDurations:[0,10,20,30],responseDelay:60,decisionDelay:0};
-const run = (estate,mode,options={}) => e.simulateWireRun(estate,mode,'artex',{...opts,...options});
+const run = (estate,mode,options={}) => e.simulateLegacyWireRun(estate,mode,'artex',{...opts,...options});
 const read = r=>r.events.find(x=>x.outcome==='succeeded'&&x.grantedCapability==='data_read');
 const classified=(events=[],controls=[],summary={dataReached:false,truncated:false})=>e.classifyRun({events,controls,summary});
 assert.deepEqual(classified(),{impact:false,incomplete:false,containedSessions:0,allContained:false,label:'No protected read established',style:''});
@@ -135,8 +136,8 @@ const unknownFinding=unknownEstate.findings.find(f=>f.kind==='cve'&&e.KEV_MITIGA
 assert(unknownFinding);
 const unknownRule=e.KEV_MITIGATION_RULES[unknownFinding.cveId].waf;
 const savedRule={...unknownRule};Object.assign(unknownRule,{state:'unknown',mitigates:false,reason:'Fixture: effectiveness unresolved.'});
-assert.doesNotThrow(()=>e.simulateWireRun(unknownEstate,'patch','lockbit'));
-assert(!e.simulateWireRun(unknownEstate,'patch','lockbit').events.some(event=>event.finding?.cveId===unknownFinding.cveId&&event.mitigation?.addressed));
+assert.doesNotThrow(()=>e.simulateLegacyWireRun(unknownEstate,'patch','lockbit'));
+assert(!e.simulateLegacyWireRun(unknownEstate,'patch','lockbit').events.some(event=>event.finding?.cveId===unknownFinding.cveId&&event.mitigation?.addressed));
 Object.assign(unknownRule,savedRule);
 const emptyOrder=fixture();emptyOrder.actionOrder=[];
 assert.deepEqual(run(emptyOrder,'baseline'),run(noOrder,'baseline'));
@@ -151,12 +152,12 @@ assert(read(weakSoc));assert(!read(decoySoc), 'Decoy evidence can precede sparse
 const untouched=structuredClone(earlyDecoy);untouched.relationships=untouched.relationships.filter(r=>r.targetId!=='decoy');
 assert(!run(untouched,'soc-canary').controls.some(c=>c.source==='canary'));
 const patchEstate=e.generateEstate({preset:'demo',seed:777});
-for(const mode of ['patch','combined']) assert(!e.simulateWireRun(patchEstate,mode,'lockbit').summary.dataReached);
+for(const mode of ['patch','combined']) assert(!e.simulateLegacyWireRun(patchEstate,mode,'lockbit').summary.dataReached);
 for(const options of [{actionDurations:[0,-1,2,3]},{attackerProfile:{maxConcurrentBranches:0}},{responseDelay:-1},{explorationLimit:0}]) assert.throws(()=>run(x,'baseline',options));
 const conventionalTimingFixture = structuredClone(x);
 // Explicitly give the timing-only fixture a method in LockBit's repertoire.
 conventionalTimingFixture.findings.forEach(f => { f.technique = 'T1190'; });
-assert(read(e.simulateWireRun(conventionalTimingFixture,'soc','lockbit',{...opts,responseDelay:100})),'Conventional attack can beat late response');
+assert(read(e.simulateLegacyWireRun(conventionalTimingFixture,'soc','lockbit',{...opts,responseDelay:100})),'Conventional attack can beat late response');
 assert(!read(run(x,'soc',{responseDelay:0})),'Agentic attack can lose to early response');
 const lateDecoy=fixture({decoy:true});
 lateDecoy.defensePosture.telemetryLayers=[];

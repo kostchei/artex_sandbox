@@ -49,6 +49,7 @@ for(const outcome of ['blocked','suppressed','ineligible']){
 }
 const legacy=structuredClone(estate);
 legacy.assets.forEach(asset=>{delete asset.dataHandling;asset.egress={cloudUploadAllowed:true,responseExportAllowed:true};});
+legacy.datasets.forEach(dataset=>{delete dataset.records;delete dataset.bytes;});
 context.run=engine.simulateWireRun(legacy,'baseline','artex');
 assert(context.run.events.some(event=>event.isProtectedRead),'Legacy estate retains confirmed reads');
 assert(context.run.summary.exfiltratedDatasets.length>0,'Unknown volume does not block an authorized export path');

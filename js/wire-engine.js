@@ -9,7 +9,8 @@
 
   const SCHEMA_VERSION = 4;
   const RUN_MANIFEST_VERSION = 1;
-  const ENGINE_VERSION = '4.0.0';
+  const ENGINE_VERSION = '4.1.0';
+  const LEGACY_PLAYBACK_ENGINE_VERSION = '4.0.0';
   const MAX_ONWARD_PER_SOURCE = 2;
   const MAX_SUCCESS_PER_LAYER = 3;
   const WAF_PORTAL_COVERAGE = 0.66;
@@ -2596,6 +2597,7 @@
 
     const events = [];
     let sequence = 0;
+    let dispatchBatch = 0;
     const recordEvent = (ev) => {
       if (events.length >= runConfig.limits.maxRecordedEvents) {
         return null;
@@ -2604,6 +2606,7 @@
       const entry = {
         id: ev.id || `event-${sequence}`,
         sequence,
+        dispatchBatch,
         causalParentIds: ev.causalParentIds || [],
         branchId: ev.branchId || 'branch-1',
         kind: ev.kind,
@@ -2878,8 +2881,9 @@
           continue;
         }
 
-        // Execute bounded investigation action if needed (Spec Section 11.1)
-        if (defenderState.investigationsExecuted < runConfig.limits.maxInvestigationActions) {
+        // The fixed playbook uses the alert's direct evidence. Investigative
+        // policies share this bounded step and the same response authority.
+        if (policy !== 'playbook' && defenderState.investigationsExecuted < runConfig.limits.maxInvestigationActions) {
           defenderState.investigationsExecuted += 1;
           recordEvent({
             kind: 'investigation',
@@ -3149,6 +3153,17 @@
       return 30 + cand.targetAsset.layerIdx * 5;
     }
 
+    function preferredMethodRank(candidate) {
+      if (!attackerProfile.gangId || candidate.localFinding) return 0;
+      const { sourceAsset, targetAsset, route } = candidate;
+      const actions = evaluateDistinctActions(worldState, sourceAsset, targetAsset, route, estate)
+        .filter(action => action.eligible && actionPolicy(action, sourceAsset, targetAsset, attackerProfile));
+      if (sourceAsset) return actions.length ? Math.min(...actions.map(action => lateralRank(action, attackerProfile))) : Infinity;
+      const order = GANG_ENTRY_ORDER[attackerProfile.gangId] || [];
+      const ranks = actions.map(action => order.findIndex(technique => techniqueMatches(technique, action.technique))).filter(rank => rank >= 0);
+      return ranks.length ? Math.min(...ranks) : order.length;
+    }
+
     while (frontier.length > 0 && !orderingUnresolved) {
       if (events.length >= runConfig.limits.maxRecordedEvents) {
         guardrailExhausted = true;
@@ -3161,9 +3176,12 @@
         break;
       }
 
+      const methodRanks = new Map(frontier.map(candidate => [candidate, preferredMethodRank(candidate)]));
       frontier.sort((a, b) =>
         scoreCandidateForPolicy(a) - scoreCandidateForPolicy(b) ||
+        ((!a.sourceAsset && !b.sourceAsset) ? methodRanks.get(a) - methodRanks.get(b) : 0) ||
         rankOf(a.targetAsset.id) - rankOf(b.targetAsset.id) ||
+        methodRanks.get(a) - methodRanks.get(b) ||
         (a.route?.id || '').localeCompare(b.route?.id || '')
       );
 
@@ -3200,6 +3218,7 @@
         }])
       );
 
+      dispatchBatch += 1;
       for (const step of batch) {
         if (events.length >= runConfig.limits.maxRecordedEvents) {
           guardrailExhausted = true;
@@ -3442,6 +3461,7 @@
         }
 
         const chosenAction = { ...distinctCandidates[0], variantId: step.variantId || 'default' };
+        const attackerEvidence = actionPolicy(chosenAction, step.sourceAsset, step.targetAsset, attackerProfile);
 
         // Check if this action requires human assistance under the attacker profile (Spec Section 8.1)
         if (chosenAction.finding?.requiresHumanAssist || (step.targetAsset.conditions?.requiresContextContinuation && attackerProfile.humanAssistancePolicy?.requiredForAmbiguousContinuation)) {
@@ -3520,6 +3540,7 @@
             reason: egressBlocked ? 'Outbound transfer is denied by the collection host egress policy.' : patchResult.reason,
             controlId: egressBlocked ? 'egress-policy' : patchResult.ruleId,
             meta: {
+              actionKind: chosenAction.actionKind,
               finding: chosenAction.finding || null,
               credentialUsed: chosenAction.credentialUsed || null,
               technique: chosenAction.technique || null,
@@ -3745,6 +3766,9 @@
             credentialUsed: chosenAction.credentialUsed || null,
             technique: chosenAction.technique || null,
             tool: chosenAction.tool || null,
+              attackerEvidence,
+              requiredAccess: chosenAction.requiredAccess,
+              reachability: chosenAction.reachability,
             variantId: chosenAction.variantId,
             grantedCapability: chosenAction.yieldsCapability,
             acquiredCredentials: newlyAcquiredCreds,
@@ -3854,8 +3878,8 @@
                 }
               }
               const ds = exportableDataset;
-              const records = ds?.records ?? (Number.isSafeInteger(step.targetAsset.dataHandling?.records) ? step.targetAsset.dataHandling.records : null);
-              const bytes = ds?.bytes ?? (Number.isSafeInteger(step.targetAsset.dataHandling?.bytes) ? step.targetAsset.dataHandling.bytes : null);
+              const records = ds.records ?? null;
+              const bytes = ds.bytes ?? null;
               const exfilFinding = {
                 id: `EXFIL:${step.targetAsset.id}`,
                 kind: 'data_exfiltration',
@@ -3967,6 +3991,7 @@
 
     // Reaching the end of the frontier is not itself a confirmation.
     if (!guardrailExhausted && !orderingUnresolved) {
+      dispatchBatch += 1;
       for (const pending of defenderState.pendingInterventions) {
         const contract = resolveInterventionContract(pending, {
           targetAsset: { id: null }, sessionId: pending.targetScopeId
@@ -4116,7 +4141,7 @@
   }
 
   /**
-   * Projects a completed causal run trace (`simulateScenario` or `simulateWireRun` result)
+   * Projects a simulation trace
    * with historical elapsed-time context, UI node/route states, "Why" explanations, and tickets,
    * without mutating the trace or altering its causal outcomes (Spec Sections 5, 12, 14, WP5).
    */
@@ -4128,10 +4153,31 @@
     const seed = presentationConfig.seed ?? run.trialSeed ?? 1;
     const timingContext = presentationConfig.timingContext || wireTiming(seed, pace);
     const stageTimes = timingContext.stageTimes || [0, 900, 1800, 2700];
+    const layerByAsset = new Map((presentationConfig.estate?.assets || []).map(asset => [asset.id, asset.layerIdx]));
+    const batchDurations = new Map();
+    const didDispatch = ev => ev.kind === 'action_result' && ['succeeded', 'denied', 'failed'].includes(ev.outcome);
+    for (const ev of run.events || []) {
+      if (!didDispatch(ev) || !ev.dispatchBatch) continue;
+      const layer = layerByAsset.get(ev.targetId);
+      const stageDuration = layer === 0 ? timingContext.reentryDurationSec : timingContext.actionDurations?.[layer];
+      const duration = ev.finding?.modeledDurationSec ?? stageDuration ?? Math.round((timingContext.modeledPathDurationSec || 2700) / 8);
+      batchDurations.set(ev.dispatchBatch, Math.max(1, duration, batchDurations.get(ev.dispatchBatch) ?? 0));
+    }
+    let previousBatch = 0;
+    let elapsed = 0;
+    let batchStart = 0;
 
     const projectedEvents = (run.events || []).map((ev, idx) => {
       const copy = structuredClone(ev);
-      if (typeof copy.timeSec !== 'number') {
+      if (Number.isInteger(ev.dispatchBatch)) {
+        if (ev.dispatchBatch !== previousBatch) {
+          batchStart = elapsed;
+          elapsed += batchDurations.get(ev.dispatchBatch) || 0;
+          previousBatch = ev.dispatchBatch;
+        }
+        copy.timeSec = elapsed;
+        if (didDispatch(ev)) copy.startSec = batchStart;
+      } else if (typeof copy.timeSec !== 'number') {
         const stepIncrement = Math.max(5, Math.round((timingContext.modeledPathDurationSec || 2700) / Math.max(8, run.events.length)));
         copy.startSec = idx * stepIncrement;
         copy.timeSec = (idx + 1) * stepIncrement;
@@ -4176,10 +4222,10 @@
         } else if (ns.visualState !== 'impact') {
           ns.visualState = 'access_established';
         }
-      } else if ((ev.outcome === 'denied' || ev.outcome === 'blocked') && (ev.controlId || ev.mitigation?.addressed)) {
+      } else if ((ev.outcome === 'denied' || ev.outcome === 'blocked') && (ev.patchEvaluation?.enforced || ev.mitigation?.addressed)) {
         ns.patchPrevented = true;
         if (!ns.compromised) ns.visualState = 'patch_prevention';
-      } else if (ev.outcome === 'denied' || ev.outcome === 'ineligible') {
+      } else if (ev.kind !== 'response_confirmation' && ['denied', 'ineligible', 'failed', 'not_attempted'].includes(ev.outcome)) {
         ns.policyDenied = true;
         if (!ns.compromised && !ns.patchPrevented) ns.visualState = 'policy_denial';
       } else if (ev.outcome === 'suppressed' || (ev.kind === 'response_confirmation' && ev.outcome === 'succeeded')) {
@@ -4289,6 +4335,7 @@
           runConfig: sharedRunConfig
         });
         cells[profile.id][defense.id] = projectRun(simRun, {
+          estate,
           seed: sharedRunConfig.trialSeed,
           pace: profile.behaviorPreset === 'agentic_orchestration' ? 'artex' : 'pre2023'
         });
@@ -4365,7 +4412,7 @@
       observedStatistics: structuredClone(CALIBRATION_REGISTER.observedStatistics),
       ...(isComparison
         ? { cells: structuredClone(comparisonOrRun.cells) }
-        : { events: structuredClone(comparisonOrRun.events || []), outcomes: structuredClone(comparisonOrRun.outcomes || null) })
+        : { events: structuredClone(comparisonOrRun.causalEvents || comparisonOrRun.events || []), outcomes: structuredClone(comparisonOrRun.outcomes || null) })
     };
     return JSON.stringify(payload, null, 2);
   }
@@ -4383,15 +4430,18 @@
   }
 
   function exportWirePlayback(estate, attackerId, run) {
+    const causal = !!run.causalEvents;
     return JSON.stringify({
       format: 'wire-simulation-manifest',
       manifestVersion: RUN_MANIFEST_VERSION,
-      engineVersion: ENGINE_VERSION,
+      engineVersion: causal ? ENGINE_VERSION : LEGACY_PLAYBACK_ENGINE_VERSION,
       schemaVersion: SCHEMA_VERSION,
       kind: 'wire_playback',
       estate,
       attackerId,
       defenseConfig: run.defenseConfig,
+      ...(causal && { attackerProfile: run.attackerProfile, runConfig: run.runConfig,
+        playbackTiming: run.playbackTiming, causalEvents: run.causalEvents, outcomes: run.outcomes }),
       events: run.events,
       controls: run.controls
     }, null, 2);
@@ -4433,7 +4483,8 @@
       return { ok: false, valid: false, errors: ['Manifest is missing required estate object'] };
     }
 
-    if (parsed.engineVersion !== ENGINE_VERSION || !['single_run', 'comparison', 'wire_playback'].includes(parsed.kind)) {
+    const legacyPlayback = parsed.kind === 'wire_playback' && parsed.engineVersion === LEGACY_PLAYBACK_ENGINE_VERSION;
+    if ((!legacyPlayback && parsed.engineVersion !== ENGINE_VERSION) || !['single_run', 'comparison', 'wire_playback'].includes(parsed.kind)) {
       return { ok: false, errors: ['Unsupported simulation engine version or manifest kind.'] };
     }
     if (parsed.kind === 'wire_playback') {
@@ -4442,9 +4493,18 @@
           typeof defenseConfig.canaries !== 'boolean' || !defenseConfig.responsePolicy) {
         return { ok: false, errors: ['Playback manifest requires explicit defense switches.'] };
       }
-      const replayed = simulateWireRun(estate, 'baseline', attackerId, { defenseConfig });
+      if (!legacyPlayback && (!parsed.attackerProfile || !parsed.runConfig || !parsed.playbackTiming)) {
+        return { ok: false, errors: ['Causal playback manifest is missing its profile, run configuration or display timing.'] };
+      }
+      const replayed = legacyPlayback ? simulateLegacyWireRun(estate, defenseConfig.id, attackerId, { defenseConfig })
+        : simulateWireRun(estate, defenseConfig.id, attackerId, {
+          defenseConfig, attackerProfile: parsed.attackerProfile, runConfig: parsed.runConfig,
+          actionDurations: parsed.playbackTiming.actionDurations, reentryDurationSec: parsed.playbackTiming.reentryDurationSec
+        });
       if (JSON.stringify(events) !== JSON.stringify(replayed.events) ||
-          JSON.stringify(controls) !== JSON.stringify(replayed.controls)) {
+          JSON.stringify(controls) !== JSON.stringify(replayed.controls) ||
+          (!legacyPlayback && (JSON.stringify(parsed.causalEvents) !== JSON.stringify(replayed.causalEvents) ||
+            JSON.stringify(parsed.outcomes) !== JSON.stringify(replayed.outcomes)))) {
         return { ok: false, errors: ['Playback trace differs from the recorded run.'] };
       }
       return { ok: true, kind: parsed.kind, manifest: parsed, replayed };
@@ -5096,40 +5156,35 @@
       id: 'default-walkthrough',
       title: 'Authored Multi-Layer Enterprise Walkthrough',
       archetypeId: 'public-web',
-      generationMode: 'authored_walkthrough',
-      requireCompletePathProbability: 0.85
+      generationMode: 'authored_walkthrough'
     },
     'walkthrough-enterprise-identity': {
       id: 'walkthrough-enterprise-identity',
       title: 'Authored Enterprise Identity & Endpoints Walkthrough',
       archetypeId: 'enterprise-identity',
       generationMode: 'authored_walkthrough',
-      preferredIngress: 'forti-vpn',
-      requireCompletePathProbability: 1.0
+      preferredIngress: 'forti-vpn'
     },
     'walkthrough-public-web': {
       id: 'walkthrough-public-web',
       title: 'Authored Public Web & Internal Data Walkthrough',
       archetypeId: 'public-web',
       generationMode: 'authored_walkthrough',
-      preferredIngress: 'f5-gateway',
-      requireCompletePathProbability: 1.0
+      preferredIngress: 'f5-gateway'
     },
     'walkthrough-cloud-saas': {
       id: 'walkthrough-cloud-saas',
       title: 'Authored Cloud & SaaS Identity Walkthrough',
       archetypeId: 'cloud-saas',
       generationMode: 'authored_walkthrough',
-      preferredIngress: 'ivanti-connect',
-      requireCompletePathProbability: 1.0
+      preferredIngress: 'ivanti-connect'
     },
     'walkthrough-cicd-secrets': {
       id: 'walkthrough-cicd-secrets',
       title: 'Authored CI/CD & Operational Secrets Walkthrough',
       archetypeId: 'cicd-secrets',
       generationMode: 'authored_walkthrough',
-      preferredIngress: 'f5-gateway',
-      requireCompletePathProbability: 1.0
+      preferredIngress: 'f5-gateway'
     }
   };
 
@@ -5160,7 +5215,13 @@
         errors.push(`Unsatisfied walkthrough condition at stage ${i} (${target.id}): ${actions[0]?.reason || 'No eligible action'}`);
         break;
       }
-      const chosen = eligible[0];
+      const nextRoute = rels.find(r => r.sourceId === target.id && r.targetId === chainIds[i + 1]);
+      const requiredCapability = nextRoute?.requiredSourceCapability || (target.layerIdx === 3 ? 'data_read' : null);
+      const chosen = requiredCapability ? eligible.find(a => a.yieldsCapability === requiredCapability) : eligible[0];
+      if (!chosen) {
+        errors.push(`Unsatisfied walkthrough condition at stage ${i} (${target.id}): ${requiredCapability} was not established`);
+        break;
+      }
       const caps = new Set([chosen.yieldsCapability]);
       state.reachedAssets.set(target.id, { layerIdx: target.layerIdx, sourceId: source?.id || null, capabilities: caps });
       for (const cred of estate.credentials || []) {
@@ -5222,7 +5283,7 @@
     });
 
     const assignCred = options.assignCredentialOnSource || ((srcAsset, targetAsset, scope = 'read', requiredSourceCapability = 'app_exec') => {
-      const credId = `cred-${srcAsset.id}-to-${targetAsset.id}`;
+      const credId = `cred-walkthrough-${srcAsset.id}-to-${targetAsset.id}`;
       if (credentials.some(c => c.id === credId)) return;
       const permissions = scope === 'read' ? ['read'] : scope === 'authenticate' ? ['authenticate'] : [scope];
       credentials.push({
@@ -5242,7 +5303,9 @@
       });
     });
 
-    const priority = seedVerifiedPath(assets, relationships, preferredIngress, rng, findings, credentials, addCve, assignCred);
+    const lastLayer = template.requiredFinalLayer ?? 3;
+    if (lastLayer !== 2 && lastLayer !== 3) throw new Error(`Invalid required final layer for walkthrough (${template.id})`);
+    const priority = seedVerifiedPath(assets, relationships, preferredIngress, rng, findings, credentials, addCve, assignCred, lastLayer);
     if (Array.isArray(estateContext.actionOrder) && priority.length) {
       estateContext.actionOrder.splice(0, estateContext.actionOrder.length, ...priority, ...estateContext.actionOrder.filter(id => !priority.includes(id)));
     }
@@ -5250,9 +5313,8 @@
     estateContext.scenarioId = template.id;
     estateContext.walkthroughRouteAssetIds = priority;
 
-    if (options.validateImmediately !== false && priority.length > 0) {
-      const activeStages = priority.filter((id, idx) => idx < 3 || findings.some(f => f.assetId === id) || credentials.some(c => c.targetAssetIds?.includes(id)));
-      const check = validateWalkthrough(estateContext, activeStages);
+    if (options.validateImmediately !== false) {
+      const check = validateWalkthrough(estateContext);
       if (!check.valid) {
         throw new Error(`Invalid authored walkthrough (${template.id}): ${check.errors.join('; ')}`);
       }
@@ -5260,7 +5322,7 @@
     return priority;
   }
 
-  function seedVerifiedPath(assets, relationships, preferredIngress, rng, findings, credentials, addCveFindingForAsset, assignCredentialOnSource) {
+  function seedVerifiedPath(assets, relationships, preferredIngress, rng, findings, credentials, addCveFindingForAsset, assignCredentialOnSource, lastLayer) {
     const byId = new Map(assets.map(asset => [asset.id, asset]));
     const bySource = new Map();
     for (const link of relationships) {
@@ -5270,7 +5332,7 @@
 
     function findRoute(asset, incoming = null) {
       const stage = { asset, link: incoming };
-      if (asset.layerIdx === 3) return [stage];
+      if (asset.layerIdx === lastLayer) return asset.isDecoy ? null : [stage];
       for (const link of shuffleWithRng(bySource.get(asset.id) || [], rng)) {
         const next = byId.get(link.targetId);
         if (next.layerIdx !== asset.layerIdx + 1) continue;
@@ -5289,7 +5351,7 @@
     }
     if (!route) return [];
 
-    const [s0, s1, s2, s3] = route;
+    const [s0, s1] = route;
     const fromLogs = rng() < 0.25;
     let cap0 = 'app_exec';
 
@@ -5361,45 +5423,26 @@
       }
     }
 
-    // Layer 1
-    let cap1 = 'account_session';
-    if (cap0 === 'app_exec' && !fromLogs) {
-      if (!findings.some(f => f.assetId === s1.asset.id)) {
-        addCveFindingForAsset(s1.asset);
+    let capability = cap0;
+    for (let index = 1; index < route.length; index++) {
+      const source = route[index - 1].asset;
+      const { asset, link } = route[index];
+      link.requiredSourceCapability = capability;
+      if (asset.layerIdx !== 3 && (index !== 1 || !fromLogs) && !findings.some(f => f.assetId === asset.id)) {
+        addCveFindingForAsset(asset);
       }
-      const f1 = findings.find(f => f.assetId === s1.asset.id);
-      if (f1 && (!f1.requiredInterface || f1.requiredInterface === s1.link.protocol)) {
-        cap1 = f1.yieldsCapability || 'app_exec';
-      } else {
-        assignCredentialOnSource(s0.asset, s1.asset, 'authenticate', cap0);
-        cap1 = 'account_session';
+      const reachedAssets = new Map([[source.id, { capabilities: new Set([capability]) }]]);
+      const getActions = () => evaluateDistinctActions({ reachedAssets, revokedCredentials: new Set(),
+        acquiredCredentials: new Map(credentials.filter(c => c.sourceAssetId === source.id && c.requiredSourceCapability === capability).map(c => [c.id, c]))
+      }, source, asset, link, { findings });
+      const matches = action => action.eligible && (asset.layerIdx !== 3 || action.yieldsCapability === 'data_read');
+      let action = getActions().find(matches);
+      if (!action) {
+        assignCredentialOnSource(source, asset, asset.layerIdx === 3 ? 'read' : 'authenticate', capability);
+        action = getActions().find(matches);
       }
-    } else {
-      cap1 = 'account_session';
-    }
-    s2.link.requiredSourceCapability = cap1;
-
-    // Layer 2
-    let cap2 = 'app_exec';
-    if (!findings.some(f => f.assetId === s2.asset.id)) {
-      addCveFindingForAsset(s2.asset);
-    }
-    const f2 = findings.find(f => f.assetId === s2.asset.id);
-    if (f2 && (!f2.requiredInterface || f2.requiredInterface === s2.link.protocol)) {
-      cap2 = f2.yieldsCapability || 'app_exec';
-    } else {
-      assignCredentialOnSource(s1.asset, s2.asset, 'authenticate', cap1);
-      cap2 = 'account_session';
-    }
-    s3.link.requiredSourceCapability = cap2;
-
-    // Layer 3 (85% complete path to protected data, 15% stop at Layer 2)
-    if (rng() < 0.85) {
-      if (!findings.some(f => f.assetId === s3.asset.id) && !addCveFindingForAsset(s3.asset)) {
-        assignCredentialOnSource(s2.asset, s3.asset, 'read', cap2);
-      } else if (!findings.some(f => f.assetId === s3.asset.id && (!f.requiredInterface || f.requiredInterface === s3.link.protocol))) {
-        assignCredentialOnSource(s2.asset, s3.asset, 'read', cap2);
-      }
+      if (!action) return [];
+      capability = action.yieldsCapability;
     }
 
     return route.map(stage => stage.asset.id);
@@ -6123,6 +6166,7 @@
       actionOrder.unshift(diagnostics.id);
     }
     let walkthroughRouteAssetIds = [];
+    let scenarioId = isAuthoredWalkthrough ? (options.scenarioId || archetype.defaultWalkthroughId || 'default-walkthrough') : null;
     if (preset === 'mixed' && isAuthoredWalkthrough) {
       const partialContext = {
         estateSeed: seed,
@@ -6133,12 +6177,11 @@
         credentials,
         actionOrder
       };
-      const scenarioId = options.scenarioId || (options.archetypeId ? archetype.defaultWalkthroughId : 'default-walkthrough') || 'default-walkthrough';
+      if (!options.scenarioId && !options.archetypeId) scenarioId = 'default-walkthrough';
       walkthroughRouteAssetIds = instantiateScenario(scenarioId, partialContext, {
         rng,
         preferredIngress,
         addCveFindingForAsset,
-        assignCredentialOnSource,
         validateImmediately: false
       });
     }
@@ -6328,7 +6371,7 @@
 
     const sensors = [0, 1, 2, 3].map(layerIdx => ({
       id: `sensor-layer-${layerIdx}`,
-      assetId: keptAssets.find(a => a.layerIdx === layerIdx)?.id || null,
+      assetId: null,
       layerIdx,
       observableActions: ['cve', 'valid_credential', 'password_spray', 'anonymous_access', 'phishing_attachment', 'remote_service', 'persistence', 'encryption', 'data_exfiltration'],
       fieldsCollected: ['sourceId', 'targetId', 'protocol', 'principalId', 'sessionId', 'technique'],
@@ -6341,7 +6384,7 @@
       {
         id: 'integration-iam-session-revocation',
         supportedActions: ['revoke_credential', 'invalidate_session', 'disable_account'],
-        authorizedScopes: keptAssets.filter(a => a.isExternalEntry).map(a => a.id),
+        authorizedScopes: keptAssets.filter(a => a.isExternalEntry).map(a => a.sessionId || `sess-${a.id}`),
         sessionSemantics: 'terminate_scoped_session',
         tokenSemantics: 'revoke_token_and_prevent_new_sessions',
         confirmationMechanism: 'synchronous_policy_ack',
@@ -6385,7 +6428,7 @@
       preset,
       generationMode,
       asOfDate: options.asOfDate ?? null,
-      scenarioId: isAuthoredWalkthrough ? (options.scenarioId || archetype.defaultWalkthroughId || 'default-walkthrough') : null,
+      scenarioId,
       walkthroughRouteAssetIds,
       intentionalPathNote: preset === 'demo'
         ? 'DEMO-READY · INTENTIONAL 4-LAYER PATH'
@@ -6396,6 +6439,7 @@
             : null,
       defensePosture: {
         telemetryLayers,
+        ...(isAuthoredWalkthrough && { defaultInterventionContract: 'confirmed_before_action' }),
         socCoverageSeed: seed,
         collectionDelaySec: Math.round(hashNode(seed, 'soc-collection', 0x9e3779b9) * 30),
         decisionDelaySec: 15 + Math.round(hashNode(seed, 'soc-decision', 0x9e3779b9) * 45),
@@ -6425,6 +6469,10 @@
     const validation = validateEstate(estate);
     if (!validation.valid) {
       throw new Error(`Generated invalid estate: ${validation.errors.join('; ')}`);
+    }
+    if (preset === 'mixed' && isAuthoredWalkthrough) {
+      const walkthrough = validateWalkthrough(estate);
+      if (!walkthrough.valid) throw new Error(`Invalid authored walkthrough (${scenarioId}): ${walkthrough.errors.join('; ')}`);
     }
     return estate;
   }
@@ -6555,6 +6603,7 @@
           interfaces: ['https'],
           auth: 'token',
           isExternalEntry: true,
+          sessionId: 'sess-primary',
           x: 0.14,
           y: 0.48
         },
@@ -6641,6 +6690,7 @@
           auth: 'token',
           isExternalEntry: false,
           isDecoyAsset: true,
+          isDecoy: true,
           x: 0.86,
           y: 0.68
         }
@@ -6733,6 +6783,10 @@
         { id: 'cmp-ri-iam', supportedActions: ['invalidate_session', 'revoke_credential'], authorizedScopes: ['sess-primary'], sessionSemantics: 'terminate_scoped_session', tokenSemantics: 'revoke_token', confirmationMechanism: 'synchronous_ack', available: true }
       ],
       assumptions: CALIBRATION_REGISTER.simulationAssumptions,
+      identityRelationships: [],
+      decoys: [],
+      legitimateWorkflows: [],
+      defensePosture: { defaultInterventionContract: 'confirmed_before_action' },
       actionOrder: ['cmp-edge', 'cmp-api', 'cmp-gw2', 'cmp-app', 'cmp-svc', 'cmp-data', 'cmp-decoy']
     };
     estate.id = 'estate-comparison-fixed';
@@ -6744,6 +6798,8 @@
     estate.assets.forEach(a => {
       const td = getTargetDef(a.groupId);
       a.icon = td?.def?.icon || 'application.png';
+      const finding = estate.findings.find(f => f.assetId === a.id);
+      a.conditions = finding?.requiredConditions || {};
     });
     return estate;
   }
@@ -6772,384 +6828,11 @@
     return `${sign}${abs} s`;
   }
 
-  function buildSpeedEvents({
-    ingressTime = 0,
-    decoyTime = 600,
-    boundaryTime = 5400,
-    lateralTime = 6300,
-    protectedReadTime = 7200,
-    patchCovered = false,
-    socDetectable = true,
-    includeDecoy = true,
-    decoyPlacement = 'early',
-    includeSecondaryBranch = false
-  }) {
-    const events = [
-      {
-        id: 'ev-ingress',
-        timeSec: ingressTime,
-        layerIdx: 0,
-        assetId: 'cmp-edge',
-        relationshipId: null,
-        prerequisiteIds: [],
-        identityId: 'sess-primary',
-        kind: 'ingress',
-        title: 'Ingress edge request',
-        detail: patchCovered
-          ? 'Edge request matches active virtual patch rule VP-EDGE-01.'
-          : 'Edge request uses an unpatched path outside virtual patch rule coverage.',
-        ruleCoverage: patchCovered
-          ? { covered: true, ruleId: 'VP-EDGE-01', label: 'Active ingress virtual patch' }
-          : { covered: false, label: 'Outside virtual patch rule coverage' },
-        telemetry: { detectable: false },
-        isDecoy: false,
-        decoyPlacement: null,
-        isBoundaryCrossing: false,
-        isProtectedRead: false
-      }
-    ];
-
-    if (includeDecoy && decoyPlacement === 'early') {
-      events.push({
-        id: 'ev-decoy',
-        timeSec: decoyTime,
-        layerIdx: 3,
-        assetId: 'cmp-decoy',
-        relationshipId: 'cmp-r-svc-decoy',
-        prerequisiteIds: ['ev-ingress'],
-        identityId: 'sess-primary',
-        kind: 'decoy',
-        title: 'Early canary decoy interaction',
-        detail: 'Session touches instrumented canary decoy, identifying sess-primary.',
-        ruleCoverage: { covered: false },
-        telemetry: { detectable: true, signalLabel: 'Canary decoy signal (sess-primary)', containableIdentity: 'sess-primary' },
-        isDecoy: true,
-        decoyPlacement: 'early',
-        isBoundaryCrossing: false,
-        isProtectedRead: false
-      });
-    }
-
-    events.push({
-      id: 'ev-boundary',
-      timeSec: boundaryTime,
-      layerIdx: 1,
-      assetId: 'cmp-api',
-      relationshipId: 'cmp-r-edge-api',
-      prerequisiteIds: ['ev-ingress'],
-      identityId: 'sess-primary',
-      kind: 'boundary',
-      title: 'First boundary crossing',
-      detail: 'Cross-boundary session reaches internal API tier.',
-      ruleCoverage: { covered: false },
-      telemetry: socDetectable
-        ? { detectable: true, signalLabel: 'Boundary crossing telemetry (sess-primary)', containableIdentity: 'sess-primary' }
-        : { detectable: false, signalLabel: 'No matching SOC telemetry' },
-      isDecoy: false,
-      decoyPlacement: null,
-      isBoundaryCrossing: true,
-      isProtectedRead: false
-    });
-
-    events.push({
-      id: 'ev-lateral',
-      timeSec: lateralTime,
-      layerIdx: 2,
-      assetId: 'cmp-app',
-      relationshipId: 'cmp-r-api-app',
-      prerequisiteIds: ['ev-boundary'],
-      identityId: 'sess-primary',
-      kind: 'lateral',
-      title: 'Internal service pivot',
-      detail: 'Workflow pivots into core application service.',
-      ruleCoverage: { covered: false },
-      telemetry: { detectable: false },
-      isDecoy: false,
-      decoyPlacement: null,
-      isBoundaryCrossing: false,
-      isProtectedRead: false
-    });
-
-    events.push({
-      id: 'ev-protected-read',
-      timeSec: protectedReadTime,
-      layerIdx: 3,
-      assetId: 'cmp-data',
-      relationshipId: 'cmp-r-app-data',
-      prerequisiteIds: ['ev-lateral'],
-      identityId: 'sess-primary',
-      kind: 'protected_read',
-      title: 'Protected record read',
-      detail: 'First unauthorized read of the designated sensitive record.',
-      ruleCoverage: { covered: false },
-      telemetry: { detectable: false },
-      isDecoy: false,
-      decoyPlacement: null,
-      isBoundaryCrossing: false,
-      isProtectedRead: true
-    });
-
-    if (includeDecoy && decoyPlacement === 'late') {
-      events.push({
-        id: 'ev-decoy',
-        timeSec: decoyTime,
-        layerIdx: 3,
-        assetId: 'cmp-decoy',
-        relationshipId: 'cmp-r-svc-decoy',
-        prerequisiteIds: ['ev-boundary'],
-        identityId: 'sess-primary',
-        kind: 'decoy',
-        title: 'Late canary decoy interaction',
-        detail: 'Session touches backend decoy after sensitive record access.',
-        ruleCoverage: { covered: false },
-        telemetry: { detectable: true, signalLabel: 'Late canary decoy signal (sess-primary)', containableIdentity: 'sess-primary' },
-        isDecoy: true,
-        decoyPlacement: 'late',
-        isBoundaryCrossing: false,
-        isProtectedRead: false
-      });
-    }
-
-    if (includeSecondaryBranch) {
-      events.push({
-        id: 'ev-unrelated',
-        timeSec: lateralTime + 15,
-        layerIdx: 2,
-        assetId: 'cmp-svc',
-        relationshipId: 'cmp-r-api-svc',
-        prerequisiteIds: [],
-        identityId: 'sess-secondary',
-        kind: 'lateral',
-        title: 'Independent secondary session activity',
-        detail: 'Unrelated identity sess-secondary continues outside sess-primary containment scope.',
-        ruleCoverage: { covered: false },
-        telemetry: { detectable: false },
-        isDecoy: false,
-        decoyPlacement: null,
-        isBoundaryCrossing: false,
-        isProtectedRead: false
-      });
-    }
-
-    events.sort((a, b) => a.timeSec - b.timeSec);
-    return events;
-  }
-
-  function buildCapabilityEvents(profileId, accessDenied) {
-    if (profileId === 'pre2023') {
-      return [
-        {
-          id: 'cap-opp-1',
-          timeSec: 15,
-          layerIdx: 1,
-          assetId: 'cmp-api',
-          relationshipId: 'cmp-r-edge-api',
-          prerequisiteIds: [],
-          identityId: 'sess-primary',
-          kind: 'opportunity_review',
-          opportunityId: 'opp-1',
-          concurrentGroup: null,
-          requiresHumanReview: true,
-          handoffDurationSec: 45,
-          title: 'Opportunity 1 reviewed (scripted check)',
-          detail: 'Operator runs scripted check on Opportunity 1 (15 s) and hits context-dependent decision point.',
-          ruleCoverage: { covered: false },
-          telemetry: { detectable: true, signalLabel: 'Scripted check telemetry (sess-primary)', containableIdentity: 'sess-primary' },
-          isDecoy: false,
-          isBoundaryCrossing: true,
-          isProtectedRead: false
-        },
-        {
-          id: 'cap-handoff-1',
-          timeSec: 60,
-          layerIdx: 2,
-          assetId: 'cmp-app',
-          relationshipId: 'cmp-r-api-app',
-          prerequisiteIds: ['cap-opp-1'],
-          identityId: 'sess-primary',
-          kind: 'human_handoff',
-          opportunityId: 'opp-1',
-          concurrentGroup: null,
-          requiresHumanReview: true,
-          handoffDurationSec: 45,
-          title: 'Human operator handoff (45 s)',
-          detail: 'Awaits human review for context-dependent decision (15 s -> 60 s, exceeds 45 s cutoff).',
-          ruleCoverage: { covered: false },
-          telemetry: { detectable: false },
-          isDecoy: false,
-          isBoundaryCrossing: false,
-          isProtectedRead: false
-        },
-        {
-          id: 'cap-opp-2',
-          timeSec: 75,
-          layerIdx: 2,
-          assetId: 'cmp-svc',
-          relationshipId: 'cmp-r-api-svc',
-          prerequisiteIds: ['cap-handoff-1'],
-          identityId: 'sess-primary',
-          kind: 'opportunity_review',
-          opportunityId: 'opp-2',
-          concurrentGroup: null,
-          requiresHumanReview: false,
-          handoffDurationSec: null,
-          title: 'Opportunity 2 reviewed',
-          detail: 'Available only after first human handoff completes.',
-          ruleCoverage: { covered: false },
-          telemetry: { detectable: false },
-          isDecoy: false,
-          isBoundaryCrossing: false,
-          isProtectedRead: false
-        },
-        {
-          id: 'cap-read',
-          timeSec: 75,
-          layerIdx: 3,
-          assetId: 'cmp-data',
-          relationshipId: 'cmp-r-app-data',
-          prerequisiteIds: ['cap-opp-2'],
-          identityId: 'sess-primary',
-          kind: 'protected_read',
-          opportunityId: 'opp-2',
-          concurrentGroup: null,
-          requiresHumanReview: false,
-          handoffDurationSec: null,
-          accessDenied,
-          title: accessDenied ? 'Protected record access denied' : 'Protected record read',
-          detail: accessDenied ? 'Shared access rules deny read of sensitive record.' : 'Protected read on Opportunity 2.',
-          ruleCoverage: { covered: false },
-          telemetry: { detectable: false },
-          isDecoy: false,
-          isBoundaryCrossing: false,
-          isProtectedRead: true
-        }
-      ];
-    }
-
-    // ARTEX agentic capability trace
-    return [
-      {
-        id: 'cap-opp-1',
-        timeSec: 15,
-        layerIdx: 1,
-        assetId: 'cmp-api',
-        relationshipId: 'cmp-r-edge-api',
-        prerequisiteIds: [],
-        identityId: 'sess-primary',
-        kind: 'opportunity_review',
-        opportunityId: 'opp-1',
-        concurrentGroup: 'batch-0',
-        requiresHumanReview: true,
-        handoffDurationSec: 45,
-        title: 'Opportunity 1 reviewed concurrently',
-        detail: 'Reviewed in parallel (0-15 s); requires 45 s human review before continuing.',
-        ruleCoverage: { covered: false },
-        telemetry: { detectable: false },
-        isDecoy: false,
-        isBoundaryCrossing: false,
-        isProtectedRead: false
-      },
-      {
-        id: 'cap-opp-2',
-        timeSec: 15,
-        layerIdx: 1,
-        assetId: 'cmp-gw2',
-        relationshipId: 'cmp-r-edge-gw2',
-        prerequisiteIds: [],
-        identityId: 'sess-primary',
-        kind: 'opportunity_review',
-        opportunityId: 'opp-2',
-        concurrentGroup: 'batch-0',
-        requiresHumanReview: false,
-        handoffDurationSec: null,
-        title: 'Opportunity 2 reviewed concurrently',
-        detail: 'Context-dependent continuation proceeds without human gate (0-15 s).',
-        ruleCoverage: { covered: false },
-        telemetry: { detectable: true, signalLabel: 'Concurrent opportunity telemetry (sess-primary)', containableIdentity: 'sess-primary' },
-        isDecoy: false,
-        isBoundaryCrossing: true,
-        isProtectedRead: false
-      },
-      {
-        id: 'cap-opp-3',
-        timeSec: 15,
-        layerIdx: 2,
-        assetId: 'cmp-svc',
-        relationshipId: 'cmp-r-api-svc',
-        prerequisiteIds: [],
-        identityId: 'sess-primary',
-        kind: 'opportunity_review',
-        opportunityId: 'opp-3',
-        concurrentGroup: 'batch-0',
-        requiresHumanReview: false,
-        handoffDurationSec: null,
-        title: 'Opportunity 3 reviewed concurrently (decoy-adjacent)',
-        detail: 'Reviewed in parallel (0-15 s); touches instrumented decoy marker.',
-        ruleCoverage: { covered: false },
-        telemetry: { detectable: true, signalLabel: 'Canary decoy signal (sess-primary)', containableIdentity: 'sess-primary' },
-        isDecoy: true,
-        decoyPlacement: 'early',
-        isBoundaryCrossing: false,
-        isProtectedRead: false
-      },
-      {
-        id: 'cap-read',
-        timeSec: 30,
-        layerIdx: 3,
-        assetId: 'cmp-data',
-        relationshipId: 'cmp-r-app-data',
-        prerequisiteIds: ['cap-opp-2'],
-        identityId: 'sess-primary',
-        kind: 'protected_read',
-        opportunityId: 'opp-2',
-        concurrentGroup: null,
-        requiresHumanReview: false,
-        handoffDurationSec: null,
-        accessDenied,
-        title: accessDenied ? 'Protected record access denied' : 'Protected record read (30 s)',
-        detail: accessDenied
-          ? 'Shared access rules deny read of designated sensitive record at 30 s.'
-          : 'Context-dependent continuation on Opportunity 2 completes protected read at 30 s.',
-        ruleCoverage: { covered: false },
-        telemetry: { detectable: false },
-        isDecoy: false,
-        isBoundaryCrossing: false,
-        isProtectedRead: true
-      },
-      {
-        id: 'cap-handoff-1',
-        timeSec: 60,
-        layerIdx: 2,
-        assetId: 'cmp-app',
-        relationshipId: 'cmp-r-api-app',
-        prerequisiteIds: ['cap-opp-1'],
-        identityId: 'sess-primary',
-        kind: 'human_handoff',
-        opportunityId: 'opp-1',
-        concurrentGroup: null,
-        requiresHumanReview: true,
-        handoffDurationSec: 45,
-        title: 'Human review on Opportunity 1 completes (60 s)',
-        detail: 'Still awaiting human review at the 45 s cutoff.',
-        ruleCoverage: { covered: false },
-        telemetry: { detectable: false },
-        isDecoy: false,
-        isBoundaryCrossing: false,
-        isProtectedRead: false
-      }
-    ];
-  }
-
-  // Fixed timestamps for the authored comparison fixtures below.
-  const TIMING_RACE = {
-    pre2023: { decoyTime: 10 * 60, boundaryTime: 75 * 60, lateralTime: 90 * 60, protectedReadTime: 105 * 60 },
-    artex: { decoyTime: 2 * 60, boundaryTime: 14 * 60 + 45, lateralTime: 15 * 60, protectedReadTime: 15 * 60 + 35 }
-  };
-
   const ATTACKER_PROFILES = {
     pre2023: {
       ...BEHAVIOR_PRESETS.operator_with_tools,
       id: 'pre2023',
+      gangId: null,
       maxConcurrentBranches: 1,
       adaptiveWafEvasion: false,
       allowsUserInteraction: true,
@@ -7356,13 +7039,16 @@
     const incomplete = result.summary.truncated;
     const enforcements = result.controls.filter(e => e.control === 'enforced');
     const reads = result.events.filter(e => e.outcome === 'succeeded' && e.isProtectedRead);
-    const effective = enforcements.filter(e => result.events.some(a => a.scope === e.scope && a.outcome === 'succeeded'));
+    const effective = enforcements.filter(e => (!result.causalEvents || e.stateChanges.some(change => change.kind === 'session_invalidated' && change.sessionId === e.scope)) &&
+      result.events.some(a => a.scope === e.scope && a.outcome === 'succeeded'));
     const activeScopes = new Set(result.events.filter(e => e.scope && e.outcome === 'succeeded').map(e => e.scope));
     const contained = new Set(effective.map(e => e.scope));
     const allContained = activeScopes.size > 0 && [...activeScopes].every(scope => contained.has(scope));
-    const late = reads.some(read => effective.some(e => e.scope === read.scope && e.timeSec > read.timeSec));
-    const encryptionLate = encrypted.some(event=>effective.some(e=>e.scope===event.scope&&e.timeSec>event.timeSec));
-    const label = incomplete ? 'Exploration incomplete' : encrypted.length ? (encryptionLate ? 'Endpoint encryption before containment' : 'Endpoint encryption')
+    const cameAfter = (response, action) => response.timeSec > action.timeSec ||
+      (response.timeSec === action.timeSec && response.sequence > action.sequence);
+    const late = reads.some(read => effective.some(e => e.scope === read.scope && cameAfter(e, read)));
+    const encryptionLate = encrypted.some(event => effective.some(e => e.scope === event.scope && cameAfter(e, event)));
+    const label = incomplete ? 'Exploration incomplete' : result.outcomes?.objectiveState === 'conditional' ? 'Conditional outcome' : encrypted.length ? (encryptionLate ? 'Endpoint encryption before containment' : 'Endpoint encryption')
       : exported.length ? 'Data exfiltrated'
       : impact ? (late ? 'Record read before containment' : 'Protected record read')
       : persisted.length ? (allContained ? 'Session contained; persistence was established' : 'Persistence established; no encryption or protected read')
@@ -7375,6 +7061,110 @@
   }
 
   function simulateWireRun(estate, mode, attackerId, options = {}) {
+    const attacker = WIRE_ATTACKERS[attackerId];
+    if (!attacker) throw new Error(`Unknown Wire attacker: ${attackerId}`);
+    const attackerProfile = { ...normalizeAttackerProfile(attackerId), ...options.attackerProfile };
+    if (!Number.isInteger(attackerProfile.maxConcurrentBranches) || attackerProfile.maxConcurrentBranches < 1) {
+      throw new Error('Worker count must be a positive integer');
+    }
+    const defenseConfig = normalizeDefenseConfig(options.defenseConfig ?? mode);
+    const pace = attackerProfile.behaviorPreset === 'agentic_orchestration' ? 'artex' : 'pre2023';
+    const timingSeed = Number.isInteger(options.runConfig?.trialSeed) ? options.runConfig.trialSeed : (estate.estateSeed ?? estate.seed);
+    const timing = wireTiming(timingSeed, pace);
+    const actionDurations = options.actionDurations ?? timing.actionDurations;
+    const reentryDurationSec = options.reentryDurationSec ?? timing.reentryDurationSec;
+    if (!Array.isArray(actionDurations) || actionDurations.length !== 4 ||
+        actionDurations.some(t => !Number.isFinite(t) || t < 0) || !Number.isFinite(reentryDurationSec) || reentryDurationSec < 0) {
+      throw new Error('Expected four nonnegative action durations and a nonnegative ingress duration');
+    }
+    const runConfig = options.explorationLimit == null ? options.runConfig : {
+      ...options.runConfig,
+      limits: { ...options.runConfig?.limits, maxActionAttempts: options.explorationLimit }
+    };
+    const causal = simulateScenario({ estate, attackerProfile, defenseConfig, runConfig });
+    const projected = projectRun(causal, {
+      estate,
+      pace,
+      seed: causal.trialSeed,
+      timingContext: {
+        actionDurations,
+        reentryDurationSec,
+        stageTimes: actionDurations.map((_, i) => actionDurations.slice(0, i + 1).reduce((sum, value) => sum + value, 0)),
+        modeledPathDurationSec: actionDurations.reduce((sum, value) => sum + value, 0)
+      }
+    });
+    const { projectedEvents, events: causalEvents, ...presentation } = projected;
+    const events = [];
+    const controls = [];
+    const assets = new Map(estate.assets.map(asset => [asset.id, asset]));
+    const layerSuccessCounts = [0, 0, 0, 0];
+    const reached = new Set();
+    for (const event of projectedEvents) {
+      const scope = event.actor?.sessionId;
+      const target = assets.get(event.targetId);
+      const playbackEvent = { ...event, scope, relationshipId: event.routeId, layerIdx: target?.layerIdx };
+      if (event.kind === 'action_result' && event.dispatchBatch > 0) {
+        if (!event.actionKind && event.finding?.kind === 'data_exfiltration') playbackEvent.actionKind = event.finding.kind;
+        if (event.outcome === 'failed' || event.outcome === 'denied') {
+          playbackEvent.outcome = event.patchEvaluation?.enforced || event.reasonCode === 'EGRESS_POLICY_DENIED' ? 'blocked' : 'ineligible';
+          if (event.patchEvaluation?.enforced) playbackEvent.mitigation = {
+            addressed: true, badge: 'VIRTUAL PATCH', control: event.patchEvaluation.ruleId
+          };
+        }
+        if (event.outcome === 'succeeded') {
+          if (!reached.has(event.targetId) && target && !target.isDecoy) layerSuccessCounts[target.layerIdx] += 1;
+          reached.add(event.targetId);
+          const read = event.objectiveChanges.find(change => change.kind === 'dataset_read');
+          if (read) playbackEvent.dataFound = { records: read.records, bytes: read.bytes };
+        }
+        events.push(playbackEvent);
+      } else if (event.kind === 'decoy_interaction' && event.decoyAlert?.alertDelivered) {
+        controls.push({ ...playbackEvent, control: 'signal', source: 'canary' });
+      } else if (event.kind === 'observation' && event.observation?.suspiciousHypothesis) {
+        const kind = event.observation.actionKind;
+        const source = ['phishing_attachment', 'encryption', 'persistence'].includes(kind) ? 'endpoint'
+          : kind === 'data_exfiltration' ? 'data-transfer' : 'sensor';
+        controls.push({ ...playbackEvent, control: 'signal', source });
+      } else if (event.kind === 'investigation') {
+        controls.push({ ...playbackEvent, control: 'investigation', source: 'response' });
+      } else if (event.kind === 'response_proposal' || event.kind === 'response_confirmation') {
+        const control = event.kind === 'response_proposal' ? 'decision'
+          : event.reasonCode === 'AUTHORITY_UNAVAILABLE' ? 'denied'
+          : ({ succeeded: 'enforced', denied: 'denied', failed: 'failed', conditional: 'conditional' })[event.outcome] || 'unresolved';
+        controls.push({ ...playbackEvent, control, source: 'response' });
+      }
+    }
+    const { costs, impact, response, guardrailExhausted } = causal.outcomes;
+    const endpointIds = kind => [...new Set(events.filter(e => e.outcome === 'succeeded' && e.actionKind === kind).flatMap(e => e.affectedEndpointIds || []))];
+    const run = {
+      ...presentation, causalEvents, events, controls,
+      mode: mode ?? defenseConfig.id,
+      lanes: attackerProfile.maxConcurrentBranches,
+      assumptions: { techniquePolicy: attackerProfile.gangId ? { gangId: attackerProfile.gangId } : null },
+      playbackTiming: { actionDurations: [...actionDurations], reentryDurationSec },
+      summary: {
+        discoveredDatasets: [...new Set(impact.sensitiveDatasetsRead.map(read => read.ownerAssetId))],
+        exfiltratedDatasets: events.filter(e => e.outcome === 'succeeded' && e.actionKind === 'data_exfiltration').map(e => e.dataTransfer),
+        encryptedEndpointIds: endpointIds('encryption'),
+        persistentEndpointIds: endpointIds('persistence'),
+        layerSuccessCounts,
+        attemptedTransitions: costs.actionAttempts,
+        evaluatedTransitions: costs.actionAttempts,
+        explorationLimit: costs.maxActionAttempts,
+        succeededTransitions: events.filter(e => e.outcome === 'succeeded').length,
+        blockedTransitions: events.filter(e => e.outcome === 'blocked').length,
+        suppressedTransitions: costs.canceledActions,
+        containedSessions: response.invalidatedSessionIds.length,
+        truncated: guardrailExhausted,
+        dataReached: impact.sensitiveDatasetsRead.length > 0
+      }
+    };
+    run.result = classifyRun(run);
+    return run;
+  }
+
+  // Kept for v1 playback manifests and historical timing regression fixtures.
+  function simulateLegacyWireRun(estate, mode, attackerId, options = {}) {
     const attacker = WIRE_ATTACKERS[attackerId];
     if (!attacker) throw new Error(`Unknown Wire attacker: ${attackerId}`);
     const defenseConfig = options.defenseConfig
@@ -7410,9 +7200,6 @@
     const result = simulateEstate(estate, effectiveMode, timing);
     result.events.sort((a,b) => a.timeSec-b.timeSec);
     result.controls.sort((a,b) => a.timeSec-b.timeSec);
-    const causalScenario = options.includeCausalScenario
-      ? simulateScenario({ estate, attackerProfile, defenseConfig, runConfig: options.runConfig })
-      : null;
     const projected = projectRun({
       trialSeed: estate.seed,
       attackerProfile,
@@ -7423,7 +7210,6 @@
       nodeStates: projected.nodeStates,
       routeStates: projected.routeStates,
       presentationContext: projected.presentationContext,
-      ...(causalScenario && { causalScenario }),
       assumptions: {stageDurationsSec: timing.actionDurations, nominalPathDurationSec: timing.modeledPathDurationSec, responseDelaySec: timing.responseDelay,
         progressionStrategy:attackerProfile.gangId?'Follow a foothold, collect and transfer data, then apply impact':'Parallel access and collection with prompt bulk transfer',
         lateralMethodPreference:attackerProfile.gangId ? {order:GANG_LATERAL_ORDER[attackerId],basis:'authored_order_among_reported_methods'} : null,
@@ -7440,442 +7226,83 @@
     return run;
   }
 
-  const COMPARISON_FIXTURES = {
-    'speed-race': {
-      id: 'speed-race',
-      kind: 'speed',
-      title: 'Speed: Timing Race (Out-of-Scope Patch)',
-      subtitle: 'Identical ordered attacker activity retimestamped at Pre-2023 vs ARTEX pace. Same 60 s SOC containment wins at Pre-2023 pace and loses at ARTEX pace.',
-      cutoffSec: null,
-      socLatencySec: 60,
-      decisionDelaySec: 15,
-      accessDenied: false,
-      assumptions: [
-        'Virtual patch has no matching rule for the ingress path (OUTSIDE RULE COVERAGE).',
-        'Regular SOC signal occurs at the first boundary crossing; containment takes 60 modeled seconds.',
-        'Early decoy identifies the same containable identity (sess-primary) as the regular SOC signal.',
-        'Same response policy, action scope, and 60 s latency across both attacker paces.'
-      ],
-      traces: {
-        pre2023: buildSpeedEvents(TIMING_RACE.pre2023),
-        artex: buildSpeedEvents(TIMING_RACE.artex)
-      }
-    },
-    'speed-covered-patch': {
-      id: 'speed-covered-patch',
-      kind: 'speed',
-      title: 'Speed: Covered Virtual Patch',
-      subtitle: 'Active ingress virtual patch rule matches the same milestone at both Pre-2023 and ARTEX paces.',
-      cutoffSec: null,
-      socLatencySec: 60,
-      decisionDelaySec: 15,
-      accessDenied: false,
-      assumptions: [
-        'Active virtual patch rule VP-EDGE-01 covers the ingress event at both paces.',
-        'Blocking at ingress suppresses all dependent downstream milestones.'
-      ],
-      traces: {
-        pre2023: buildSpeedEvents({ ...TIMING_RACE.pre2023, patchCovered: true }),
-        artex: buildSpeedEvents({ ...TIMING_RACE.artex, patchCovered: true })
-      }
-    },
-    'capability-45s': {
-      id: 'capability-45s',
-      kind: 'capability',
-      title: 'Capability: 45s Review Window',
-      subtitle: 'Common pace and 45 s budget across 3 service opportunities (15 s/review, 45 s human handoff).',
-      cutoffSec: 45,
-      socLatencySec: 60,
-      decisionDelaySec: 15,
-      accessDenied: false,
-      assumptions: [
-        'Three abstract service opportunities available to both profiles under identical access rules.',
-        '15 s per opportunity review; 45 s duration for any required human handoff.',
-        'Human-led trace reviews sequentially and waits at Opportunity 1 handoff; ARTEX reviews all 3 concurrently.'
-      ],
-      traces: {
-        pre2023: buildCapabilityEvents('pre2023', false),
-        artex: buildCapabilityEvents('artex', false)
-      }
-    },
-    'capability-denied': {
-      id: 'capability-denied',
-      kind: 'capability',
-      title: 'Capability: Access Denied (45s)',
-      subtitle: 'Same 45 s window and workflow traces, with access to the designated sensitive record denied.',
-      cutoffSec: 45,
-      socLatencySec: 60,
-      decisionDelaySec: 15,
-      accessDenied: true,
-      assumptions: [
-        'Shared access rules deny read access to the designated sensitive record.',
-        'Both profiles end without a protected read while still differing in opportunities reviewed.'
-      ],
-      traces: {
-        pre2023: buildCapabilityEvents('pre2023', true),
-        artex: buildCapabilityEvents('artex', true)
-      }
-    },
-    'speed-no-signal': {
-      id: 'speed-no-signal',
-      kind: 'speed',
-      title: 'Edge Case: No Matching SOC Signal',
-      subtitle: 'Observable telemetry is absent, so Agentic SOC never triggers.',
-      cutoffSec: null,
-      socLatencySec: 60,
-      decisionDelaySec: 15,
-      accessDenied: false,
-      assumptions: ['No matching SOC telemetry is emitted during the trace.'],
-      traces: {
-        pre2023: buildSpeedEvents({ ingressTime: 0, decoyTime: 600, boundaryTime: 5400, lateralTime: 6300, protectedReadTime: 7200, socDetectable: false, includeDecoy: false }),
-        artex: buildSpeedEvents({ ingressTime: 0, decoyTime: 5, boundaryTime: 30, lateralTime: 55, protectedReadTime: 80, socDetectable: false, includeDecoy: false })
-      }
-    },
-    'speed-at-objective': {
-      id: 'speed-at-objective',
-      kind: 'speed',
-      title: 'Edge Case: Same-Timestamp Enforcement Tie',
-      subtitle: 'SOC enforcement becomes effective at the exact timestamp of the protected read.',
-      cutoffSec: null,
-      socLatencySec: 60,
-      decisionDelaySec: 15,
-      accessDenied: false,
-      assumptions: ['When enforcement and protected read share a timestamp, objective takes precedence unless enforcementPrecedesOnTie is set.'],
-      traces: {
-        pre2023: buildSpeedEvents({ ingressTime: 0, decoyTime: 600, boundaryTime: 7140, lateralTime: 7170, protectedReadTime: 7200 }),
-        artex: buildSpeedEvents({ ingressTime: 0, decoyTime: 5, boundaryTime: 20, lateralTime: 50, protectedReadTime: 80 })
-      }
-    },
-    'speed-late-decoy': {
-      id: 'speed-late-decoy',
-      kind: 'speed',
-      title: 'Edge Case: Late Decoy Placement',
-      subtitle: 'Decoy interaction occurs after the protected read.',
-      cutoffSec: null,
-      socLatencySec: 60,
-      decisionDelaySec: 15,
-      accessDenied: false,
-      assumptions: ['Decoy is placed behind the protected record so alert arrives after data access.'],
-      traces: {
-        pre2023: buildSpeedEvents({ ingressTime: 0, decoyTime: 7500, boundaryTime: 5400, lateralTime: 6300, protectedReadTime: 7200, decoyPlacement: 'late' }),
-        artex: buildSpeedEvents({ ingressTime: 0, decoyTime: 100, boundaryTime: 30, lateralTime: 55, protectedReadTime: 80, decoyPlacement: 'late' })
-      }
-    },
-    'speed-untouched-decoy': {
-      id: 'speed-untouched-decoy',
-      kind: 'speed',
-      title: 'Edge Case: Untouched Decoy',
-      subtitle: 'Attacker trace never interacts with the instrumented decoy.',
-      cutoffSec: null,
-      socLatencySec: 60,
-      decisionDelaySec: 15,
-      accessDenied: false,
-      assumptions: ['An untouched decoy produces no alert.'],
-      traces: {
-        pre2023: buildSpeedEvents({ ingressTime: 0, boundaryTime: 5400, lateralTime: 6300, protectedReadTime: 7200, includeDecoy: false }),
-        artex: buildSpeedEvents({ ingressTime: 0, boundaryTime: 30, lateralTime: 55, protectedReadTime: 80, includeDecoy: false })
-      }
-    },
-    'speed-scope-mismatch': {
-      id: 'speed-scope-mismatch',
-      kind: 'speed',
-      title: 'Edge Case: Containment Scope Mismatch',
-      subtitle: 'Containment of sess-primary leaves independent sess-secondary activity in progress.',
-      cutoffSec: null,
-      socLatencySec: 60,
-      decisionDelaySec: 15,
-      accessDenied: false,
-      assumptions: ['Containment is scoped to sess-primary; unrelated sess-secondary events continue.'],
-      traces: {
-        pre2023: buildSpeedEvents({ ingressTime: 0, decoyTime: 600, boundaryTime: 5400, lateralTime: 6300, protectedReadTime: 7200, includeSecondaryBranch: true }),
-        artex: buildSpeedEvents({ ingressTime: 0, decoyTime: 5, boundaryTime: 30, lateralTime: 55, protectedReadTime: 80, includeSecondaryBranch: true })
-      }
-    }
-  };
+  const COMPARISON_FIXTURES = Object.fromEntries([
+    { id: 'speed-race', title: 'Observed ingress and confirmed response', sensor: true, decoy: 'early' },
+    { id: 'speed-covered-patch', title: 'Covered inline patch', covered: true, decoy: 'early' },
+    { id: 'capability-45s', title: 'Scoped dataset access' },
+    { id: 'capability-denied', title: 'Dataset read permission denied', accessDenied: true },
+    { id: 'speed-no-signal', title: 'No matching signal' },
+    { id: 'speed-at-objective', title: 'Response ordering at the dataset access check', sensor: true, orderAtRead: true },
+    { id: 'speed-late-decoy', title: 'Decoy downstream of the dataset', decoy: 'late' },
+    { id: 'speed-untouched-decoy', title: 'Deployed decoy with no traversable route', decoy: 'untouched' },
+    { id: 'speed-scope-mismatch', title: 'Response integration lacks the observed session scope', sensor: true, unrelatedScope: true }
+  ].map(fixture => [fixture.id, fixture]));
 
-  function evaluateComparisonRun(fixtureId, profileId, defenseId, options = {}) {
+  function comparisonInputs(fixtureId, options) {
     const fixture = COMPARISON_FIXTURES[fixtureId];
     if (!fixture) throw new Error(`Unknown comparison fixture: ${fixtureId}`);
-    const profile = COMPARISON_PROFILES[profileId];
-    if (!profile) throw new Error(`Unknown comparison profile: ${profileId}`);
-    const defense = COMPARISON_DEFENSES[defenseId];
-    if (!defense) throw new Error(`Unknown comparison defense: ${defenseId}`);
-
-    const rawEvents = fixture.traces[profileId] || [];
-    const cutoffSec = fixture.cutoffSec;
-    const useVirtualPatch = defenseId === 'patch' || (defenseId === 'combined' && options.combineVirtualPatch);
-    const useSoc = defenseId === 'soc' || defenseId === 'combined';
-    const useCanaries = defenseId === 'canaries' || (defenseId === 'combined' && options.useDecoySignal !== false);
-    const enforcementPrecedesOnTie = !!options.enforcementPrecedesOnTie;
-
-    const blockedEventIds = new Set();
-    const containedIdentities = new Set();
-    const trace = [];
-    const alerts = [];
-
-    let telemetryTimeSec = null;
-    let decisionTimeSec = null;
-    let enforcementTimeSec = null;
-    let signalSource = null;
-    let edgeBlockedTimeSec = null;
-    let patchMissed = false;
-    let decoyTriggeredTimeSec = null;
-    let protectedReadReached = false;
-    let protectedReadTimeSec = null;
-    let accessDeniedObserved = false;
-
-    const reviewedOpportunities = new Set();
-    const concurrentBatchSet = new Set();
-    let manualHandoffs = 0;
-
-    let pendingContainment = null;
-
-    function enforceContainment() {
-      const { timeSec, identityId, source } = pendingContainment;
-      enforcementTimeSec = timeSec;
-      containedIdentities.add(identityId);
-      trace.push({
-        id: `soc-enforce-${identityId}`,
-        timeSec,
-        layerIdx: 1,
-        assetId: 'cmp-api',
-        relationshipId: null,
-        identityId,
-        kind: 'containment',
-        outcome: 'enforced',
-        title: 'Agentic SOC containment effective',
-        detail: `Containment enforced for ${identityId} (signal: ${source}).`,
-        reason: protectedReadReached
-          ? 'CONTAINMENT EFFECTIVE AFTER DATA ACCESS'
-          : 'CONTAINMENT EFFECTIVE'
+    const estate = createComparisonEstate();
+    const ingress = estate.assets.find(asset => asset.id === 'cmp-edge');
+    const decoy = estate.assets.find(asset => asset.id === 'cmp-decoy');
+    estate.sensors = fixture.sensor ? estate.sensors.filter(sensor => sensor.layerIdx === 0).map(sensor => ({
+      ...sensor, assetId: ingress.id, deterministicDetection: true
+    })) : [];
+    if (!fixture.covered) {
+      estate.enforcementPoints = [];
+      estate.patchRules = [];
+      for (const route of estate.routes) route.enforcementPointIds = [];
+    }
+    if (fixture.accessDenied) estate.credentials[0].permissions = ['authenticate'];
+    if (fixture.unrelatedScope) estate.responseIntegrations[0].authorizedScopes = ['sess-unrelated'];
+    estate.decoys = fixture.decoy ? [{
+      id: 'cmp-decoy-sensor', assetId: decoy.id, kind: 'decoy_asset', triggerPredicate: 'successful_access',
+      deployed: true, identifiesSession: true
+    }] : [];
+    const decoyRoute = estate.routes.find(route => route.id === 'cmp-r-svc-decoy');
+    if (fixture.decoy === 'early' || fixture.decoy === 'late') {
+      decoyRoute.sourceId = fixture.decoy === 'early' ? ingress.id : 'cmp-data';
+      decoyRoute.requiredSourceCapability = fixture.decoy === 'early' ? 'app_exec' : 'data_read';
+      estate.findings.push({
+        id: 'cmp-f-decoy', assetId: decoy.id, kind: 'anonymous_access',
+        requiredInterface: 'api-https', yieldsCapability: 'data_read', technique: 'T1190',
+        title: 'Decoy fixture access'
       });
     }
+    const runConfig = options.runConfig ?? (fixture.orderAtRead ? {
+      interventionContracts: [{
+        responseActionType: 'invalidate_session', dependentTargetId: 'cmp-data',
+        contract: options.enforcementPrecedesOnTie ? 'confirmed_before_action' : 'confirmed_after_action'
+      }]
+    } : {});
+    return { fixture, estate, runConfig };
+  }
 
-    for (const ev of rawEvents) {
-      if (cutoffSec !== null && ev.timeSec > cutoffSec) {
-        continue;
-      }
+  function comparisonDefense(defenseId, options) {
+    if (!Object.hasOwn(COMPARISON_DEFENSES, defenseId)) throw new Error(`Unknown comparison defense: ${defenseId}`);
+    const config = normalizeDefenseConfig(defenseId);
+    return defenseId === 'combined' && options.useDecoySignal === false ? { ...config, canaries: false } : config;
+  }
 
-      if (pendingContainment && enforcementTimeSec === null) {
-        const arrivesBefore = enforcementPrecedesOnTie
-          ? pendingContainment.timeSec <= ev.timeSec
-          : pendingContainment.timeSec < ev.timeSec;
-        if (arrivesBefore) enforceContainment();
-      }
-
-      const prereqBlocked = (ev.prerequisiteIds || []).some(pid => blockedEventIds.has(pid));
-      if (prereqBlocked) {
-        blockedEventIds.add(ev.id);
-        trace.push({
-          ...ev,
-          outcome: 'suppressed',
-          reason: 'PREREQUISITE BLOCKED'
-        });
-        continue;
-      }
-
-      // Check if this event's identity is already contained
-      if (containedIdentities.has(ev.identityId)) {
-        blockedEventIds.add(ev.id);
-        trace.push({
-          ...ev,
-          outcome: 'suppressed',
-          reason: 'CONTAINMENT ACTIVE'
-        });
-        continue;
-      }
-
-      // Track capability review metrics for unblocked events within cutoff
-      if (ev.kind === 'opportunity_review' && ev.opportunityId) {
-        reviewedOpportunities.add(ev.opportunityId);
-        if (ev.concurrentGroup) concurrentBatchSet.add(ev.opportunityId);
-        if (ev.requiresHumanReview) manualHandoffs += 1;
-      }
-
-      // Virtual Patching check
-      if (useVirtualPatch && ev.kind === 'ingress') {
-        if (ev.ruleCoverage && ev.ruleCoverage.covered) {
-          blockedEventIds.add(ev.id);
-          edgeBlockedTimeSec = ev.timeSec;
-          alerts.push({ timeSec: ev.timeSec, source: 'virtual_patch', label: ev.ruleCoverage.ruleId || 'RULE MATCH' });
-          trace.push({
-            ...ev,
-            outcome: 'blocked',
-            reason: 'RULE MATCH · BLOCKED AT EDGE'
-          });
-          continue;
-        } else {
-          patchMissed = true;
-        }
-      }
-
-      // Canaries check
-      if (ev.isDecoy) {
-        if (useCanaries) {
-          decoyTriggeredTimeSec = decoyTriggeredTimeSec === null ? ev.timeSec : Math.min(decoyTriggeredTimeSec, ev.timeSec);
-          alerts.push({ timeSec: ev.timeSec, source: 'canary', label: 'DECOY TRIGGERED' });
-        } else if (defenseId === 'canaries') {
-          // shouldn't happen since useCanaries is true for canaries
-        }
-      }
-
-      // Agentic SOC telemetry check (decoy signal only counts if useCanaries is true)
-      if (useSoc && ev.telemetry && ev.telemetry.detectable) {
-        const isDecoyOnly = ev.isDecoy && !useCanaries;
-        if (!isDecoyOnly && !pendingContainment) {
-          const sigTime = ev.timeSec;
-          const decTime = sigTime + fixture.decisionDelaySec;
-          const enfTime = sigTime + fixture.socLatencySec;
-          telemetryTimeSec = sigTime;
-          decisionTimeSec = decTime;
-          signalSource = ev.isDecoy ? 'canary' : 'regular';
-          alerts.push({ timeSec: sigTime, source: signalSource, label: ev.telemetry.signalLabel });
-          pendingContainment = {
-            timeSec: enfTime,
-            identityId: ev.telemetry.containableIdentity || ev.identityId,
-            source: signalSource
-          };
-        }
-      }
-
-      // Protected read check
-      if (ev.isProtectedRead) {
-        if (ev.accessDenied) {
-          accessDeniedObserved = true;
-          trace.push({
-            ...ev,
-            outcome: 'denied',
-            reason: 'ACCESS DENIED'
-          });
-        } else {
-          protectedReadReached = true;
-          protectedReadTimeSec = ev.timeSec;
-          trace.push({
-            ...ev,
-            outcome: 'succeeded',
-            reason: 'PROTECTED RECORD READ'
-          });
-        }
-        continue;
-      }
-
-      trace.push({
-        ...ev,
-        outcome: ev.isDecoy && useCanaries ? 'alert' : 'succeeded',
-        reason: ev.isDecoy && useCanaries
-          ? (defenseId === 'canaries' ? 'DECOY TRIGGERED · ALERT ONLY' : 'DECOY TRIGGERED · SIGNAL TO SOC')
-          : (useVirtualPatch && ev.kind === 'ingress' ? 'OUTSIDE RULE COVERAGE' : 'OBSERVED')
-      });
-    }
-
-    if (pendingContainment && enforcementTimeSec === null &&
-        (cutoffSec === null || pendingContainment.timeSec <= cutoffSec)) {
-      enforceContainment();
-    }
-
-    trace.sort((a, b) => a.timeSec - b.timeSec);
-
-    // Determine baseline reference protected read time for margin / lead time calculations
-    let baselineProtectedReadSec = null;
-    if (defenseId === 'baseline') {
-      baselineProtectedReadSec = protectedReadTimeSec;
-    } else {
-      const baseRun = evaluateComparisonRun(fixtureId, profileId, 'baseline');
-      baselineProtectedReadSec = baseRun.protectedReadTimeSec;
-    }
-
-    alerts.sort((a, b) => a.timeSec - b.timeSec);
-    const firstAlert = alerts.length > 0 ? alerts[0] : null;
-    const firstAlertTimeSec = firstAlert ? firstAlert.timeSec : null;
-    const firstAlertSource = firstAlert ? firstAlert.source : null;
-
-    // Determine effective control time & reason
-    let effectiveControlTimeSec = null;
-    let controlReason = 'NO ACTIVE DEFENSES';
-
-    if (defenseId === 'baseline') {
-      controlReason = accessDeniedObserved ? 'ACCESS DENIED' : (protectedReadReached ? 'UNMITIGATED · PROTECTED READ' : 'NO PROTECTED READ BY CUTOFF');
-    } else if (edgeBlockedTimeSec !== null) {
-      effectiveControlTimeSec = edgeBlockedTimeSec;
-      controlReason = 'RULE MATCH · BLOCKED AT EDGE';
-    } else if (defenseId === 'patch') {
-      controlReason = 'OUTSIDE RULE COVERAGE';
-    } else if (defenseId === 'canaries') {
-      if (decoyTriggeredTimeSec !== null) {
-        controlReason = 'DECOY TRIGGERED · ALERT ONLY';
-      } else {
-        controlReason = 'DECOY UNTOUCHED · NO ALERT';
-      }
-    } else if (defenseId === 'soc' || defenseId === 'combined') {
-      if (!pendingContainment) {
-        controlReason = 'NO MATCHING SIGNAL';
-      } else if (enforcementTimeSec === null) {
-        controlReason = 'CONTAINMENT PENDING AT CUTOFF';
-      } else {
-        effectiveControlTimeSec = enforcementTimeSec;
-        if (protectedReadReached) {
-          controlReason = 'CONTAINMENT EFFECTIVE AFTER DATA ACCESS';
-        } else {
-          controlReason = 'CONTAINED BEFORE DATA ACCESS';
-        }
-      }
-    }
-
-    const responseMarginSec = (baselineProtectedReadSec !== null && effectiveControlTimeSec !== null)
-      ? baselineProtectedReadSec - effectiveControlTimeSec
-      : null;
-
-    const detectionLeadTimeSec = (baselineProtectedReadSec !== null && firstAlertTimeSec !== null)
-      ? baselineProtectedReadSec - firstAlertTimeSec
-      : null;
-
-    return {
-      fixtureId,
-      fixtureKind: fixture.kind,
-      fixtureTitle: fixture.title,
-      profileId,
-      profileLabel: profile.label,
-      defenseId,
-      defenseLabel: defense.label,
-      cutoffSec,
-      protectedReadReached,
-      protectedReadTimeSec,
-      accessDeniedObserved,
-      baselineProtectedReadSec,
-      firstAlertTimeSec,
-      firstAlertSource,
-      telemetryTimeSec,
-      decisionTimeSec,
-      enforcementTimeSec,
-      scheduledEnforcementTimeSec: pendingContainment?.timeSec ?? null,
-      effectiveControlTimeSec,
-      signalSource,
-      controlReason,
-      responseMarginSec,
-      detectionLeadTimeSec,
-      patchMissed,
-      opportunitiesReviewed: reviewedOpportunities.size,
-      concurrentReviews: concurrentBatchSet.size,
-      manualHandoffs,
-      assumptions: fixture.assumptions,
-      trace
-    };
+  function evaluateComparisonRun(fixtureId, profileId, defenseId, options = {}) {
+    if (!Object.hasOwn(COMPARISON_PROFILES, profileId)) throw new Error(`Unknown comparison profile: ${profileId}`);
+    const inputs = comparisonInputs(fixtureId, options);
+    const result = evaluateComparison({
+      ...inputs,
+      attackerProfiles: [profileId],
+      defenseConfigs: defenseId === 'baseline' ? ['baseline'] : ['baseline', comparisonDefense(defenseId, options)]
+    });
+    return result.cells[profileId][defenseId];
   }
 
   function evaluateComparisonMatrix(fixtureId, options = {}) {
-    const profiles = ['pre2023', 'artex'];
-    const defenses = ['baseline', 'patch', 'soc', 'canaries', 'combined'];
-    const cells = {};
-    for (const p of profiles) {
-      cells[p] = {};
-      for (const d of defenses) {
-        cells[p][d] = evaluateComparisonRun(fixtureId, p, d, options);
-      }
-    }
+    const inputs = comparisonInputs(fixtureId, options);
     return {
-      fixture: COMPARISON_FIXTURES[fixtureId],
-      estate: createComparisonEstate(),
-      cells
+      ...evaluateComparison({
+        ...inputs,
+        attackerProfiles: Object.keys(COMPARISON_PROFILES),
+        defenseConfigs: Object.keys(COMPARISON_DEFENSES).map(id => comparisonDefense(id, options))
+      }),
+      fixture: inputs.fixture
     };
   }
 
@@ -7944,6 +7371,7 @@
     evaluateDefense,
     simulateEstate,
     simulateWireRun,
+    simulateLegacyWireRun,
     generateEstate,
     referenceServiceFlow,
     migrateSnapshot

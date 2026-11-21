@@ -1,3 +1,4 @@
+// Historical diagnostic for the timed runner retained for archived Wire manifests.
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
@@ -51,7 +52,7 @@ function keyEvent(event){
     :event.actionKind||event.finding?.cveId||event.technique||event.finding?.kind||event.outcome;
 }
 function generateReport(rows){
-  const lines=['# Five paired activity-flow reviews','',
+  const lines=['# Five paired activity-flow reviews (archived timed runner)','',
     'Each pair uses the identical generated estate for ARTEX and one gang. Five fixed seeds were selected before changing progression; they are not selected for successful outcomes. Four defense modes are checked for every pair (40 runs); the detailed logs below show baseline. Times are elapsed H:MM:SS. This review concerns causal order and consistency, not field-duration calibration.','',
     '## Findings and corrections','',
     '- Gang runs previously opened multiple footholds at the same instant and interleaved unrelated branches. They now prefer progressing an established foothold; additional access attempts consume five minutes. The starting foothold remains at time zero.',
@@ -69,7 +70,7 @@ function generateReport(rows){
     lines.push(`| ${row.gang} / ${row.seed} | ${row.gangRun.result.label} | ${row.artexRun.result.label} | ${failed(row.gangRun)} | ${failed(row.artexRun)} |`);
   }
   lines.push('','## Detailed activity logs','',
-    'These show the completed sequence, including timed dead ends; the UI presents the same activity newest first. Source-only PATH REVIEW entries describe reasoning about an unavailable continuation, rather than claiming an unreachable target was probed.','');
+    'These show the completed sequence, including timed dead ends; the historical playback presents the same activity newest first. Source-only PATH REVIEW entries describe reasoning about an unavailable continuation, rather than claiming an unreachable target was probed.','');
   for(const row of rows)for(const [actor,run]of [[row.gang,row.gangRun],['ARTEX',row.artexRun]]){
     lines.push(`### ${actor} · seed ${row.seed}`,'','| Start → end | Event | Asset / known source | Outcome |','| --- | --- | --- | --- |');
     const labels=new Map(row.estate.assets.map(asset=>[asset.id,asset.label]));
@@ -87,8 +88,8 @@ const rows=[];
 for(const [gang,seed]of cases){
   const estate=engine.generateEstate({seed,seedExercise:true}),snapshot=JSON.stringify(estate),runs={};
   for(const mode of ['baseline','patch','soc','combined'])for(const actor of [gang,'artex']){
-    const run=engine.simulateWireRun(estate,mode,actor);validate(estate,run);
-    assert.deepEqual(engine.simulateWireRun(estate,mode,actor),run,'Replay retains progression');
+    const run=engine.simulateLegacyWireRun(estate,mode,actor);validate(estate,run);
+    assert.deepEqual(engine.simulateLegacyWireRun(estate,mode,actor),run,'Replay retains progression');
     assert.equal(JSON.stringify(estate),snapshot,'Review does not mutate the estate');
     if(mode==='baseline')runs[actor]=run;
   }

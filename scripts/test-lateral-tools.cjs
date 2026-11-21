@@ -1,3 +1,4 @@
+// Regression coverage for the timed runner used by archived Wire playback manifests.
 const assert=require('node:assert/strict');
 const e=require('../js/wire-engine');
 function fixture(protocol='rdp',tool=false) {
@@ -16,7 +17,7 @@ function fixture(protocol='rdp',tool=false) {
       permissions:['execute','service_execute'],revoked:false,expired:false}],
     defensePosture:{telemetryLayers:[0,1,2,3],decoys:[],collectionDelaySec:0,decisionDelaySec:0}};
 }
-const run=(x,actor,options={},mode='baseline')=>e.simulateWireRun(x,mode,actor,{actionDurations:[0,20,20,20],...options});
+const run=(x,actor,options={},mode='baseline')=>e.simulateLegacyWireRun(x,mode,actor,{actionDurations:[0,20,20,20],...options});
 const reached=r=>r.events.find(x=>x.targetId==='target'&&x.outcome==='succeeded');
 for(const actor of ['lockbit','conti','blackcat','hive','revil','artex']) {
   const x=fixture(),before=JSON.stringify(x),result=run(x,actor);

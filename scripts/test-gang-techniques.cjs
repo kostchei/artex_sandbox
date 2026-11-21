@@ -45,7 +45,7 @@ for (const change of ['route','credential','permission','revoked','expired','aud
   const modified = structuredClone(estate);
   const credential = modified.credentials.find(c => c.sourceAssetId === 'windows-desktop' && c.audience === 'windows-management');
   assert(credential);
-  if (change === 'route') modified.relationships = modified.relationships.filter(r => r.sourceId !== 'windows-desktop');
+  if (change === 'route') modified.routes = modified.relationships = modified.routes.filter(r => r.sourceId !== 'windows-desktop');
   if (change === 'credential') modified.credentials = modified.credentials.filter(c => c !== credential);
   if (change === 'permission') credential.permissions = ['read'];
   if (change === 'revoked') credential.revoked = true;
@@ -90,12 +90,12 @@ for(const gang of ['conti','revil']){
   const isolated=e.generateEstate({seed:1,seedExercise:true});
   isolated.findings=isolated.findings.filter(f=>f.kind==='phishing_attachment');
   isolated.credentials=[];
-  isolated.defensePosture.telemetryLayers=[0];
+  isolated.sensors.forEach(sensor => { sensor.availability = sensor.layerIdx === 0; });
   const baseline=run(isolated,gang), monitored=run(isolated,gang,'soc');
   assert.equal(success(baseline).length,1);assert.equal(success(baseline)[0].targetId,'windows-desktop');
   assert.equal(baseline.result.impact,false);
   assert(monitored.controls.some(c=>c.control==='signal'&&c.source==='endpoint'&&c.targetId==='windows-desktop'));
-  isolated.defensePosture.telemetryLayers=[];
+  isolated.sensors.forEach(sensor => { sensor.availability = false; });
   assert(!run(isolated,gang,'soc').controls.some(c=>c.control==='signal'),'Unmonitored endpoint cannot produce SOC detection');
 }
 console.log('PASS gang policy: sourced filters, distinct SMB/WMI choices, phishing gates, RDP/MFA, credentials, reachability, WAF scope, 720 paired runs and replay');

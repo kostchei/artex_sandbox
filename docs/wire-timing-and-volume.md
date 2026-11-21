@@ -1,6 +1,6 @@
 # Timing and data volumes in Wire
 
-Keep one stopwatch and the existing defense cards. Label the clock **Modeled elapsed**. It starts at the assumed foothold and advances with the displayed event trace. Browser playback speed is independent. The existing scheduled durations remain explicit simulation assumptions while the timed playback evaluator is in use.
+The **Modeled elapsed** stopwatch starts with the first modeled probes and advances through the causal event trace. Each concurrent batch takes the longest projected action duration in that batch. The browser can play the same trace at different speeds. The simulation determines the causal order of access and response before assigning display timestamps.
 
 Show the historical calibration in the existing **Controls & Manifest** panel, next to the current run's modeled first lateral move, first protected read, alert, containment, and completed export when present. The historical references retain their original milestones and populations.
 

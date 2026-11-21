@@ -41,7 +41,7 @@
     if(!execution.length)return null;
     const controlled=new Set(execution.map(e=>e.targetId));
     const remote=run.events.filter(e=>controlled.has(e.sourceId) && e.sourceId!==e.targetId &&
-      !assets.get(e.targetId)?.isDecoy && !e.actionKind);
+      !assets.get(e.targetId)?.isDecoy && (e.relationshipId || !e.actionKind));
     const reached=new Set(remote.filter(e=>e.outcome==='succeeded').map(e=>e.targetId));
     const failures=remote.filter(e=>['ineligible','blocked','suppressed'].includes(e.outcome) && !reached.has(e.targetId));
     if(reached.size && !failures.length)return null;

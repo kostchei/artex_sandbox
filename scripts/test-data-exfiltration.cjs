@@ -1,3 +1,4 @@
+// Regression coverage for the timed runner used by archived Wire playback manifests.
 const assert=require('node:assert/strict');
 const e=require('../js/wire-engine');
 const gangs=['lockbit','conti','blackcat','hive','revil'];
@@ -24,7 +25,7 @@ function fixture(){
     actionOrder:assets.map(a=>a.id),defensePosture:{telemetryLayers:[0,1,2,3],decoys:[],collectionDelaySec:0,decisionDelaySec:0,responseDelaySec:10000}};
 }
 const options={actionDurations:[0,10,10,10],decisionDelay:0,responseDelay:10000};
-const run=(estate,actor='artex',mode='baseline',extra={})=>e.simulateWireRun(estate,mode,actor,{...options,...extra});
+const run=(estate,actor='artex',mode='baseline',extra={})=>e.simulateLegacyWireRun(estate,mode,actor,{...options,...extra});
 const transferred=r=>r.events.find(x=>x.actionKind==='data_exfiltration'&&x.outcome==='succeeded');
 for(const actor of [...gangs,'artex']){
   const estate=fixture(),snapshot=JSON.stringify(estate),result=run(estate,actor);

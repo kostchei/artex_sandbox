@@ -118,10 +118,10 @@ async function main(){
       estate.assets.find(a=>a.id==='windows-desktop').conditions.mailFilterBlocksAttachment=true;prepare();});
     assert.equal(await panels[0].evaluate(()=>comparison.done),false,'Ready view has not run');
     await page.click('#run');
-    const failedEntry=await panels[0].evaluate(()=>({done:comparison.done,time:modeledTime,hud:runHud.textContent,
-      successes:run.events.filter(e=>e.outcome==='succeeded').length}));
-    assert.equal(failedEntry.done,true,'Zero-duration REvil run completes on explicit start');
-    assert.equal(failedEntry.time,0);assert.equal(failedEntry.successes,0);
+    const failedEntry=await panels[0].evaluate(()=>{comparison.advance(Infinity);return {done:comparison.done,time:modeledTime,hud:runHud.textContent,
+      successes:run.events.filter(e=>e.outcome==='succeeded').length};});
+    assert.equal(failedEntry.done,true,'Failed entry playback completes');
+    assert(failedEntry.time>0);assert.equal(failedEntry.successes,0);
     assert.match(failedEntry.hud,/REvil.*No access established.*Mail filtering blocks/);
     await page.evaluate(()=>{document.getElementById('seed').value=3;generate();});
     await page.click('#run');
@@ -133,11 +133,11 @@ async function main(){
     for(const gang of ['conti','revil']){
       await page.evaluate(gang=>{gangId=gang;estate=WireEngine.generateEstate({seed:1,seedExercise:true});
         estate.findings=estate.findings.filter(f=>f.kind==='phishing_attachment');estate.credentials=[];runBoth();},gang);
-      const phish=await panels[0].evaluate(()=>({done:comparison.done,state:currentNodes.get('windows-desktop').el.querySelector('.node-state').textContent,
-        tickets:[...socTickets.values()],impact:run.result.impact}));
+      const phish=await panels[0].evaluate(()=>{comparison.advance(Infinity);return {state:currentNodes.get('windows-desktop').el.querySelector('.node-state').textContent,
+        tickets:[...socTickets.values()],impact:run.result.impact};});
       assert.equal(phish.state,'PHISH EXECUTED');assert.equal(phish.impact,false);
       assert(phish.tickets.some(t=>t.title.includes('Phishing attachment executed')&&t.severity==='HIGH'),`${gang} phishing alert appears without lateral movement`);
-      assert(await panels[0].evaluate(()=>{comparison.advance(Infinity);return comparison.done;}),`${gang} isolated phish completes`);
+      assert(await panels[0].evaluate(()=>comparison.done),`${gang} isolated phish completes`);
       const lateral=await panels[0].evaluate(()=>({hud:runHud.textContent,activity:comparison.activity()}));
       assert.match(lateral.hud,/No lateral movement established|Lateral movement failed/);
       assert.match(lateral.hud,/No usable outgoing route|No applicable|No supported|No access|credential|permission/i);
@@ -148,8 +148,13 @@ async function main(){
     assert.match(stopped.hud,/Lateral movement failed/);
     assert(stopped.activity.some(item=>item.code==='LATERAL MOVEMENT'&&/credential/i.test(item.detail)),
       'A failed Conti continuation explains credential prerequisites even when local encryption succeeds');
-    await page.evaluate(()=>{estate.findings=[];estate.credentials=[];runBoth();});
-    assert(await page.evaluate(()=>frames.every(f=>f.contentWindow.comparison.done)),'Both zero-duration runs complete');
+    await page.evaluate(()=>{
+      const duration = document.getElementById('duration');
+      duration.add(new Option('Fast test playback', '0.01'));
+      duration.value = '0.01';
+      estate.findings=[];estate.credentials=[];runBoth();
+    });
+    await page.waitForFunction(()=>frames.every(f=>f.contentWindow.comparison.done) && status.textContent.includes('Both complete'));
     assert.match(await page.locator('#status').textContent(),/Both complete/);
     await page.goto(`${base}/wire.html?capture=path&manual=1`);
     await page.waitForFunction(()=>!!window.pathCapture);
